@@ -1,0 +1,13 @@
+apiVersion: backstage.io/v1alpha1
+kind: Location
+metadata:
+  schemaVersion: v1.0.0
+  name: kotlin-brtc-sdk-location
+  description: Links to additional entities in the kotlin-brtc-sdk repository.
+  annotations:
+    github.com/project-slug: Bandwidth/kotlin-brtc-sdk
+spec:
+  targets:
+    - ./component.yaml
+    # - add more components using relative filepaths here
+    # - you may also rename/move the original component.yaml file

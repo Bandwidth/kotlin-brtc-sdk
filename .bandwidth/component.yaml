@@ -1,0 +1,17 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  schemaVersion: v1.0.0
+  name: kotlin-brtc-sdk
+  description: Kotlin SDK for Bandwidth RTC
+  annotations:
+    github.com/project-slug: Bandwidth/kotlin-brtc-sdk
+  organization: BW
+  costCenter: 
+  platformType: 
+  buildPlatform: N/A
+spec:
+  type: Library
+  owner: github/band-programmable-voice
+  lifecycle: Prototype
+  
