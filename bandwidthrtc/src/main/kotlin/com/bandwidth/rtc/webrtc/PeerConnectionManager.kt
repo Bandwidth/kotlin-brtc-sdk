@@ -6,6 +6,7 @@ import com.bandwidth.rtc.util.Logger
 import kotlinx.coroutines.delay
 import org.webrtc.*
 import org.webrtc.audio.AudioDeviceModule
+import org.webrtc.audio.JavaAudioDeviceModule
 import java.nio.ByteBuffer
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -196,7 +197,17 @@ class PeerConnectionManager(
         val stream = factory.createLocalMediaStream(streamId)
 
         if (audio) {
-            val audioConstraints = MediaConstraints()
+            // Disable WebRTC software audio processing for any feature handled by hardware
+            // to avoid double processing. Fall back to software when hardware is unavailable
+            // (e.g. emulators).
+            val hardwareAec = JavaAudioDeviceModule.isBuiltInAcousticEchoCancelerSupported()
+            val hardwareNs = JavaAudioDeviceModule.isBuiltInNoiseSuppressorSupported()
+            val audioConstraints = MediaConstraints().apply {
+                mandatory.add(MediaConstraints.KeyValuePair("googEchoCancellation", if (hardwareAec) "false" else "true"))
+                mandatory.add(MediaConstraints.KeyValuePair("googNoiseSuppression", if (hardwareNs) "false" else "true"))
+                mandatory.add(MediaConstraints.KeyValuePair("googAutoGainControl", "true"))
+                mandatory.add(MediaConstraints.KeyValuePair("googHighpassFilter", "true"))
+            }
             val audioSource = factory.createAudioSource(audioConstraints)
             val audioTrack = factory.createAudioTrack("audio-$streamId", audioSource)
             stream.addTrack(audioTrack)

@@ -1,6 +1,7 @@
 package com.bandwidth.rtc.media
 
 import android.content.Context
+import android.media.AudioManager
 import com.bandwidth.rtc.util.Logger
 import org.webrtc.audio.AudioDeviceModule
 import org.webrtc.audio.JavaAudioDeviceModule
@@ -21,6 +22,14 @@ import org.webrtc.audio.JavaAudioDeviceModule
 class MixingAudioDevice(context: Context) {
 
     private val log = Logger
+    private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    private val previousAudioMode = audioManager.mode
+
+    // Only use hardware AEC/NS if the device actually supports them.
+    // On emulators and some devices these are not available and enabling them
+    // unconditionally leaves audio processing unconfigured.
+    val supportsHardwareAec = JavaAudioDeviceModule.isBuiltInAcousticEchoCancelerSupported()
+    val supportsHardwareNs = JavaAudioDeviceModule.isBuiltInNoiseSuppressorSupported()
 
     /** Called with Float32 audio samples for visualization after each mic capture chunk. */
     var onLocalAudioLevel: ((FloatArray) -> Unit)? = null
@@ -33,6 +42,11 @@ class MixingAudioDevice(context: Context) {
     val audioDeviceModule: AudioDeviceModule
 
     init {
+        // MODE_IN_COMMUNICATION enables hardware-level voice processing (AEC, routing)
+        // and is required for VoIP. Without it the audio stack stays in MODE_NORMAL
+        // which is optimized for media playback, not microphone capture.
+        audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+
         audioDeviceModule = JavaAudioDeviceModule.builder(context)
             .setSamplesReadyCallback { samples ->
                 // Mic capture samples — AudioSamples.getData() returns byte[] of 16-bit PCM
@@ -50,14 +64,15 @@ class MixingAudioDevice(context: Context) {
                     onLocalAudioLevel?.invoke(floatSamples)
                 }
             }
-            .setUseHardwareAcousticEchoCanceler(true)
-            .setUseHardwareNoiseSuppressor(true)
+            .setUseHardwareAcousticEchoCanceler(supportsHardwareAec)
+            .setUseHardwareNoiseSuppressor(supportsHardwareNs)
             .createAudioDeviceModule()
 
-        log.debug("MixingAudioDevice created")
+        log.debug("MixingAudioDevice created (hardwareAec=$supportsHardwareAec, hardwareNs=$supportsHardwareNs)")
     }
 
     fun release() {
+        audioManager.mode = previousAudioMode
         audioDeviceModule.release()
         log.debug("MixingAudioDevice released")
     }

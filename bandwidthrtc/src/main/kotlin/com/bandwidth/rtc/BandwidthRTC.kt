@@ -90,6 +90,7 @@ class BandwidthRTC(
 
     /** Connect to the BRTC platform using a JWT endpoint token. */
     suspend fun connect(authParams: RtcAuthParams, options: RtcOptions? = null) {
+        Logger.info("BandwidthRTC connect() called")
         if (isConnected) throw BandwidthRTCError.AlreadyConnected()
 
         this.options = options
@@ -101,6 +102,7 @@ class BandwidthRTC(
         registerEventHandlers(sig)
 
         // Connect WebSocket
+        Logger.info("Connecting signaling...")
         sig.connect(authParams = authParams, options = options)
 
         // Use injected peer connection manager or create new
@@ -115,12 +117,14 @@ class BandwidthRTC(
             }
 
             // Create the custom audio device
+            Logger.info("Initializing mixing device...")
             val mixing = MixingAudioDevice(context)
             mixing.onLocalAudioLevel = { samples -> onLocalAudioLevel?.invoke(samples) }
             mixing.onRemoteAudioLevel = { samples -> onRemoteAudioLevel?.invoke(samples) }
             this.mixingDevice = mixing
 
             // Set up peer connections with the custom audio device module
+            Logger.info("Initializing peer connection manager...")
             val newPCMgr = PeerConnectionManager(context, options, mixing.audioDeviceModule)
             this.peerConnectionManager = newPCMgr
             newPCMgr.setupPublishingPeerConnection()
@@ -131,12 +135,15 @@ class BandwidthRTC(
         // Wire up peer connection callbacks
         pcMgr.onStreamAvailable = { stream, mediaTypes ->
             val rtcStream = RtcStream(mediaStream = stream, mediaTypes = mediaTypes)
+            Logger.info("onStreamAvailable: ${rtcStream.streamId}")
             onStreamAvailable?.invoke(rtcStream)
         }
         pcMgr.onStreamUnavailable = { streamId ->
+            Logger.info("onStreamUnavailable: $streamId")
             onStreamUnavailable?.invoke(streamId)
         }
         pcMgr.onSubscribingIceConnectionStateChange = { state ->
+            Logger.info("onSubscribingIceConnectionStateChange: $state")
             if (state == PeerConnection.IceConnectionState.DISCONNECTED ||
                 state == PeerConnection.IceConnectionState.FAILED
             ) {
@@ -146,6 +153,7 @@ class BandwidthRTC(
         }
 
         // Send setMediaPreferences to initiate the signaling flow
+        Logger.info("Sending setMediaPreferences...")
         val mediaResult = sig.setMediaPreferences()
         Logger.debug("setMediaPreferences result: endpoint=${mediaResult.endpointId}, hasPublishOffer=${mediaResult.publishSdpOffer != null}, hasSubscribeOffer=${mediaResult.subscribeSdpOffer != null}")
 
@@ -176,6 +184,7 @@ class BandwidthRTC(
 
     /** Disconnect from the BRTC platform. */
     suspend fun disconnect() {
+        Logger.info("BandwidthRTC disconnect() called")
         cleanupSession()
         Logger.info("Disconnected from BRTC")
     }
@@ -183,6 +192,7 @@ class BandwidthRTC(
     // MARK: - Private: Session Cleanup
 
     private suspend fun cleanupSession() {
+        Logger.info("Cleaning up session...")
         peerConnectionManager?.cleanup()
         peerConnectionManager = null
         mixingDevice?.release()
@@ -196,6 +206,7 @@ class BandwidthRTC(
 
     /** Publish local audio. Adds local tracks, then creates a client-initiated offer sent via offerSdp. */
     suspend fun publish(audio: Boolean = true, alias: String? = null): RtcStream {
+        Logger.info("BandwidthRTC publish() called audio=$audio alias=$alias")
         val pcManager = peerConnectionManager
         val signalingClient = signaling
         if (!isConnected || pcManager == null || signalingClient == null) {
@@ -232,6 +243,7 @@ class BandwidthRTC(
 
     /** Unpublish a previously published stream. */
     suspend fun unpublish(stream: RtcStream) {
+        Logger.info("BandwidthRTC unpublish() called: ${stream.streamId}")
         val pcManager = peerConnectionManager
         val signalingClient = signaling
         if (!isConnected || pcManager == null || signalingClient == null) {
@@ -251,11 +263,13 @@ class BandwidthRTC(
 
     /** Enable or disable the microphone for all published streams. */
     fun setMicEnabled(enabled: Boolean) {
+        Logger.info("BandwidthRTC setMicEnabled($enabled)")
         peerConnectionManager?.setAudioEnabled(enabled)
     }
 
     /** Send DTMF tones. */
     fun sendDtmf(tone: String) {
+        Logger.info("BandwidthRTC sendDtmf($tone)")
         peerConnectionManager?.sendDtmf(tone)
     }
 
@@ -282,6 +296,7 @@ class BandwidthRTC(
 
     /** Request an outbound connection to a phone number, endpoint, or call ID. */
     suspend fun requestOutboundConnection(id: String, type: EndpointType): OutboundConnectionResult {
+        Logger.info("BandwidthRTC requestOutboundConnection($id, $type)")
         val sig = signaling
         if (sig == null || !isConnected) throw BandwidthRTCError.NotConnected()
         return sig.requestOutboundConnection(id = id, type = type)
@@ -289,6 +304,7 @@ class BandwidthRTC(
 
     /** Hang up a connection. */
     suspend fun hangupConnection(endpoint: String, type: EndpointType): HangupResult {
+        Logger.info("BandwidthRTC hangupConnection($endpoint, $type)")
         val sig = signaling
         if (sig == null || !isConnected) throw BandwidthRTCError.NotConnected()
         return sig.hangupConnection(endpoint = endpoint, type = type)
@@ -306,6 +322,7 @@ class BandwidthRTC(
     private fun registerEventHandlers(signaling: SignalingClientInterface) {
         // Handle incoming SDP offers for subscribing
         signaling.onEvent("sdpOffer") { data ->
+            Logger.info("Signaling event: sdpOffer")
             scope.launch {
                 handleSubscribeSdpOffer(data)
             }
@@ -313,6 +330,7 @@ class BandwidthRTC(
 
         // Handle ready event
         signaling.onEvent("ready") { data ->
+            Logger.info("Signaling event: ready")
             val metadata: ReadyMetadata = if (data.isEmpty()) {
                 ReadyMetadata()
             } else {
@@ -328,11 +346,13 @@ class BandwidthRTC(
 
         // Handle established event
         signaling.onEvent("established") {
+            Logger.info("Signaling event: established")
             Logger.debug("Connection established")
         }
 
         // Handle disconnect
         signaling.onEvent("close") {
+            Logger.info("Signaling event: close")
             Logger.warn("WebSocket closed")
             isConnected = false
         }

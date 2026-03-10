@@ -47,6 +47,7 @@ internal class SignalingClient(
     // MARK: - Connection
 
     override suspend fun connect(authParams: RtcAuthParams, options: RtcOptions?) {
+        log.info("SignalingClient.connect() called")
         if (isConnected) throw BandwidthRTCError.AlreadyConnected()
 
         val baseUrl = options?.websocketUrl ?: DEFAULT_GATEWAY_URL
@@ -62,7 +63,7 @@ internal class SignalingClient(
             append("&endpointToken=${authParams.endpointToken}")
         }
 
-        log.debug("Gateway URL: $url")
+        log.debug("Signaling Gateway URL: $url")
 
         val ws = webSocketFactory()
         this.webSocket = ws
@@ -70,10 +71,11 @@ internal class SignalingClient(
         scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
         suspendCoroutine { continuation ->
+            log.debug("Connecting WebSocket...")
             ws.connect(url, object : WebSocketEventListener {
                 override fun onOpen() {
                     isConnected = true
-                    log.debug("WebSocket connection opened")
+                    log.info("WebSocket connection opened successfully")
                     continuation.resume(Unit)
                 }
 
@@ -82,11 +84,11 @@ internal class SignalingClient(
                 }
 
                 override fun onClosing(code: Int, reason: String) {
-                    log.debug("WebSocket closing: $code $reason")
+                    log.info("WebSocket closing: code=$code, reason=$reason")
                 }
 
                 override fun onClosed(code: Int, reason: String) {
-                    log.info("WebSocket closed: $code $reason")
+                    log.info("WebSocket closed: code=$code, reason=$reason")
                     handleDisconnect()
                 }
 
@@ -104,15 +106,19 @@ internal class SignalingClient(
         }
 
         startPingLoop()
-        log.info("Connected to gateway")
+        log.info("SignalingClient connected and ping loop started")
     }
 
     override suspend fun disconnect() {
-        log.info("Disconnecting")
+        log.info("SignalingClient.disconnect() called")
 
         // Send leave notification (fire-and-forget)
-        sendNotification("leave", json.encodeToJsonElement(EmptyParams()))
-        log.debug("Leave notification sent")
+        try {
+            sendNotification("leave", json.encodeToJsonElement(EmptyParams()))
+            log.debug("Leave notification sent")
+        } catch (e: Exception) {
+            log.warn("Failed to send leave notification: ${e.message}")
+        }
 
         pingJob?.cancel()
         pingJob = null
@@ -124,32 +130,38 @@ internal class SignalingClient(
         isConnected = false
 
         // Fail any pending requests
+        log.debug("Failing ${pendingRequests.size} pending requests due to disconnect")
         for ((_, continuation) in pendingRequests) {
             continuation.resumeWithException(BandwidthRTCError.WebSocketDisconnected())
         }
         pendingRequests.clear()
+        log.info("SignalingClient disconnected")
     }
 
     // MARK: - Event Handlers
 
     override fun onEvent(method: String, handler: (String) -> Unit) {
+        log.debug("Registering event handler for: $method")
         eventHandlers[method] = handler
     }
 
     override fun removeEventHandler(method: String) {
+        log.debug("Removing event handler for: $method")
         eventHandlers.remove(method)
     }
 
     // MARK: - RPC Methods
 
     override suspend fun setMediaPreferences(): SetMediaPreferencesResult {
+        log.debug("SignalingClient.setMediaPreferences()")
         val params = json.encodeToJsonElement(SetMediaPreferencesParams())
         val result = call("setMediaPreferences", params)
-            ?: return SetMediaPreferencesResult()
+            ?: return SetMediaPreferencesResult().also { log.warn("setMediaPreferences returned null result") }
         return json.decodeFromJsonElement(SetMediaPreferencesResult.serializer(), result)
     }
 
     override suspend fun offerSdp(sdpOffer: String, peerType: String): OfferSdpResult {
+        log.debug("SignalingClient.offerSdp() peerType=$peerType")
         val params = json.encodeToJsonElement(OfferSdpParams(sdpOffer = sdpOffer, peerType = peerType))
         val result = call("offerSdp", params)
             ?: throw BandwidthRTCError.SdpNegotiationFailed("No result from offerSdp")
@@ -157,21 +169,24 @@ internal class SignalingClient(
     }
 
     override suspend fun answerSdp(sdpAnswer: String, peerType: String) {
+        log.debug("SignalingClient.answerSdp() peerType=$peerType")
         val params = json.encodeToJsonElement(AnswerSdpParams(peerType = peerType, sdpAnswer = sdpAnswer))
         call("answerSdp", params)
     }
 
     override suspend fun requestOutboundConnection(id: String, type: EndpointType): OutboundConnectionResult {
+        log.info("SignalingClient.requestOutboundConnection(id=$id, type=$type)")
         val params = json.encodeToJsonElement(RequestOutboundConnectionParams(id = id, type = type))
         val result = call("requestOutboundConnection", params)
-            ?: return OutboundConnectionResult(accepted = false)
+            ?: return OutboundConnectionResult(accepted = false).also { log.warn("requestOutboundConnection returned null") }
         return json.decodeFromJsonElement(OutboundConnectionResult.serializer(), result)
     }
 
     override suspend fun hangupConnection(endpoint: String, type: EndpointType): HangupResult {
+        log.info("SignalingClient.hangupConnection(endpoint=$endpoint, type=$type)")
         val params = json.encodeToJsonElement(HangupConnectionParams(endpoint = endpoint, type = type))
         val result = call("hangupConnection", params)
-            ?: return HangupResult()
+            ?: return HangupResult().also { log.warn("hangupConnection returned null") }
         return json.decodeFromJsonElement(HangupResult.serializer(), result)
     }
 
@@ -179,18 +194,22 @@ internal class SignalingClient(
 
     private suspend fun call(method: String, params: JsonElement): JsonElement? {
         val ws = webSocket
-        if (ws == null || !isConnected) throw BandwidthRTCError.NotConnected()
+        if (ws == null || !isConnected) {
+            log.error("Cannot call RPC method '$method': Not connected")
+            throw BandwidthRTCError.NotConnected()
+        }
 
         val id = generateRequestId()
         val request = JsonRpcRequest(id = id, method = method, params = params)
         val message = json.encodeToString(request)
 
-        log.debug("RPC call: $method id=$id")
+        log.debug(">>> RPC call: $method (id=$id)")
 
         return suspendCoroutine { continuation ->
             pendingRequests[id] = continuation
 
             if (!ws.send(message)) {
+                log.error("Failed to send RPC message for id=$id")
                 pendingRequests.remove(id)
                 continuation.resumeWithException(
                     BandwidthRTCError.SignalingError("Failed to send message")
@@ -206,7 +225,7 @@ internal class SignalingClient(
         val notification = JsonRpcNotification(method = method, params = params)
         val message = json.encodeToString(notification)
 
-        log.debug("RPC notify: $method")
+        log.debug(">>> RPC notify: $method")
         ws.send(message)
     }
 
@@ -220,7 +239,7 @@ internal class SignalingClient(
     // MARK: - Private: Message Handling
 
     private fun handleMessage(text: String) {
-        log.debug("WS received: ${text.take(200)}")
+        log.debug("<<< WS received: ${if (text.length > 500) text.take(500) + "..." else text}")
 
         val incoming = try {
             json.decodeFromString(JsonRpcIncoming.serializer(), text)
@@ -233,6 +252,8 @@ internal class SignalingClient(
             handleResponse(incoming)
         } else if (incoming.isNotification) {
             handleNotification(incoming, text)
+        } else {
+            log.warn("Received unknown JSON-RPC message type: $text")
         }
     }
 
@@ -247,21 +268,21 @@ internal class SignalingClient(
 
         val error = response.error
         if (error != null) {
-            log.error("RPC error id=$id: ${error.message}")
+            log.error("RPC error response (id=$id): code=${error.code}, message=${error.message}")
             if (error.code == 403 || error.message.lowercase().contains("invalid token")) {
                 continuation.resumeWithException(BandwidthRTCError.InvalidToken())
             } else {
                 continuation.resumeWithException(BandwidthRTCError.RpcError(error.code, error.message))
             }
         } else {
-            log.debug("RPC response id=$id")
+            log.debug("<<< RPC response (id=$id) SUCCESS")
             continuation.resume(response.result)
         }
     }
 
     private fun handleNotification(notification: JsonRpcIncoming, rawText: String) {
         val method = notification.method ?: return
-        log.debug("Server notification: $method")
+        log.debug("<<< Server notification: $method")
 
         val handler = eventHandlers[method]
         if (handler != null) {
@@ -276,13 +297,19 @@ internal class SignalingClient(
         val wasConnected = isConnected
         isConnected = false
 
+        log.info("SignalingClient.handleDisconnect() wasConnected=$wasConnected")
+
         // Fail all pending requests
-        for ((_, continuation) in pendingRequests) {
-            continuation.resumeWithException(BandwidthRTCError.WebSocketDisconnected())
+        if (pendingRequests.isNotEmpty()) {
+            log.debug("Failing ${pendingRequests.size} pending requests due to disconnect")
+            for ((_, continuation) in pendingRequests) {
+                continuation.resumeWithException(BandwidthRTCError.WebSocketDisconnected())
+            }
+            pendingRequests.clear()
         }
-        pendingRequests.clear()
 
         if (wasConnected) {
+            log.debug("Triggering 'close' event handler")
             eventHandlers["close"]?.invoke("")
         }
     }
@@ -290,11 +317,12 @@ internal class SignalingClient(
     // MARK: - Private: Ping Keepalive
 
     private fun startPingLoop() {
+        log.debug("Starting ping loop (interval=${PING_INTERVAL_MS}ms)")
         pingJob = scope?.launch {
             while (isActive) {
                 delay(PING_INTERVAL_MS)
+                log.debug("Sending periodic ping...")
                 sendNotification("ping", json.encodeToJsonElement(EmptyParams()))
-                log.debug("Ping sent")
             }
         }
     }
