@@ -4,7 +4,7 @@ import com.bandwidth.rtc.types.EndpointType
 import kotlinx.serialization.Serializable
 
 @Serializable
-internal data class RequestOutboundConnectionParams(
+data class RequestOutboundConnectionParams(
     val id: String,
     val type: EndpointType
 )

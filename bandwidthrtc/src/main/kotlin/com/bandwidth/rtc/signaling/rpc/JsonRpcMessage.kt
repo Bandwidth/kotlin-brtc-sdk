@@ -5,7 +5,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 
 @Serializable
-internal data class JsonRpcRequest(
+data class JsonRpcRequest(
     val jsonrpc: String = "2.0",
     val id: String,
     val method: String,
@@ -13,21 +13,21 @@ internal data class JsonRpcRequest(
 )
 
 @Serializable
-internal data class JsonRpcNotification(
+data class JsonRpcNotification(
     val jsonrpc: String = "2.0",
     val method: String,
     val params: JsonElement
 )
 
 @Serializable
-internal data class JsonRpcError(
+data class JsonRpcError(
     val code: Int,
     val message: String,
     val data: JsonElement? = null
 )
 
 @Serializable
-internal data class JsonRpcIncoming(
+data class JsonRpcIncoming(
     val jsonrpc: String? = null,
     val id: String? = null,
     val method: String? = null,
