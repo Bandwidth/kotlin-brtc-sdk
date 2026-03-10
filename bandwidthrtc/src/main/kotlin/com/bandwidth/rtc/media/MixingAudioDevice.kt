@@ -1,7 +1,9 @@
 package com.bandwidth.rtc.media
 
 import android.content.Context
+import android.media.AudioDeviceInfo
 import android.media.AudioManager
+import android.os.Build
 import com.bandwidth.rtc.util.Logger
 import org.webrtc.audio.AudioDeviceModule
 import org.webrtc.audio.JavaAudioDeviceModule
@@ -25,11 +27,8 @@ class MixingAudioDevice(context: Context) {
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val previousAudioMode = audioManager.mode
 
-    // Only use hardware AEC/NS if the device actually supports them.
-    // On emulators and some devices these are not available and enabling them
-    // unconditionally leaves audio processing unconfigured.
-    val supportsHardwareAec = JavaAudioDeviceModule.isBuiltInAcousticEchoCancelerSupported()
-    val supportsHardwareNs = JavaAudioDeviceModule.isBuiltInNoiseSuppressorSupported()
+    val supportsHardwareAec = false
+    val supportsHardwareNs = false
 
     /** Called with Float32 audio samples for visualization after each mic capture chunk. */
     var onLocalAudioLevel: ((FloatArray) -> Unit)? = null
@@ -71,8 +70,32 @@ class MixingAudioDevice(context: Context) {
         log.debug("MixingAudioDevice created (hardwareAec=$supportsHardwareAec, hardwareNs=$supportsHardwareNs)")
     }
 
+    @Suppress("DEPRECATION")
+    fun setSpeakerphoneOn(enabled: Boolean) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            if (enabled) {
+                val speakerDevice = audioManager.availableCommunicationDevices
+                    .firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+                if (speakerDevice != null) {
+                    audioManager.setCommunicationDevice(speakerDevice)
+                }
+            } else {
+                audioManager.clearCommunicationDevice()
+            }
+        } else {
+            audioManager.isSpeakerphoneOn = enabled
+        }
+        log.debug("Speakerphone ${if (enabled) "on" else "off"}")
+    }
+
+    @Suppress("DEPRECATION")
     fun release() {
         audioManager.mode = previousAudioMode
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            audioManager.clearCommunicationDevice()
+        } else {
+            audioManager.isSpeakerphoneOn = false
+        }
         audioDeviceModule.release()
         log.debug("MixingAudioDevice released")
     }

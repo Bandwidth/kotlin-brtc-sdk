@@ -20,7 +20,7 @@ interface PeerConnectionManagerInterface {
     fun addLocalTracks(audio: Boolean): MediaStream
     fun removeLocalTracks(streamId: String)
     suspend fun createPublishOffer(): String
-    suspend fun applyPublishAnswer(localOffer: String, remoteAnswer: String)
+    suspend fun applyPublishAnswer(remoteAnswer: String)
     suspend fun handleSubscribeSdpOffer(
         sdpOffer: String,
         sdpRevision: Int?,

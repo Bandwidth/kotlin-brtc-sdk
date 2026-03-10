@@ -230,7 +230,7 @@ class BandwidthRTC(
         Logger.debug("Server answered publish offer")
 
         // 5. Apply the server's answer
-        pcManager.applyPublishAnswer(localOffer = localOffer, remoteAnswer = result.sdpAnswer)
+        pcManager.applyPublishAnswer(remoteAnswer = result.sdpAnswer)
         Logger.debug("Publish SDP exchange complete")
 
         val mediaTypes = mutableListOf<MediaType>()
@@ -254,7 +254,7 @@ class BandwidthRTC(
 
         val localOffer = pcManager.createPublishOffer()
         val result = signalingClient.offerSdp(sdpOffer = localOffer, peerType = "publish")
-        pcManager.applyPublishAnswer(localOffer = localOffer, remoteAnswer = result.sdpAnswer)
+        pcManager.applyPublishAnswer(remoteAnswer = result.sdpAnswer)
 
         Logger.info("Unpublished stream ${stream.streamId}")
     }
@@ -265,6 +265,12 @@ class BandwidthRTC(
     fun setMicEnabled(enabled: Boolean) {
         Logger.info("BandwidthRTC setMicEnabled($enabled)")
         peerConnectionManager?.setAudioEnabled(enabled)
+    }
+
+    /** Route audio to the speakerphone or earpiece. */
+    fun setSpeakerphoneOn(enabled: Boolean) {
+        Logger.info("BandwidthRTC setSpeakerphoneOn($enabled)")
+        mixingDevice?.setSpeakerphoneOn(enabled)
     }
 
     /** Send DTMF tones. */
@@ -288,8 +294,16 @@ class BandwidthRTC(
             previousInboundBytes = previousSnapshot?.bytesReceived ?: 0,
             previousOutboundBytes = previousSnapshot?.bytesSent ?: 0,
             previousTimestamp = previousSnapshot?.timestamp ?: 0.0,
-            completion = completion
-        )
+        ) { snapshot ->
+            // Synthesize remote audio samples from the stats audioLevel so the
+            // onRemoteAudioLevel callback (and waveform visualization) gets driven.
+            // Android's WebRTC SDK has no playout-tap callback, so we use the
+            // inbound-rtp audioLevel stat (0.0–1.0 linear amplitude) instead.
+            val level = snapshot.audioLevel.toFloat()
+            val samples = FloatArray(9600) { level }
+            onRemoteAudioLevel?.invoke(samples)
+            completion(snapshot)
+        }
     }
 
     // MARK: - Call Control (Low-Level)

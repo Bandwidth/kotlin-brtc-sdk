@@ -200,13 +200,11 @@ class PeerConnectionManager(
             // Disable WebRTC software audio processing for any feature handled by hardware
             // to avoid double processing. Fall back to software when hardware is unavailable
             // (e.g. emulators).
-            val hardwareAec = JavaAudioDeviceModule.isBuiltInAcousticEchoCancelerSupported()
-            val hardwareNs = JavaAudioDeviceModule.isBuiltInNoiseSuppressorSupported()
             val audioConstraints = MediaConstraints().apply {
-                mandatory.add(MediaConstraints.KeyValuePair("googEchoCancellation", if (hardwareAec) "false" else "true"))
-                mandatory.add(MediaConstraints.KeyValuePair("googNoiseSuppression", if (hardwareNs) "false" else "true"))
-                mandatory.add(MediaConstraints.KeyValuePair("googAutoGainControl", "true"))
-                mandatory.add(MediaConstraints.KeyValuePair("googHighpassFilter", "true"))
+                mandatory.add(MediaConstraints.KeyValuePair("googEchoCancellation", "false"))
+                mandatory.add(MediaConstraints.KeyValuePair("googNoiseSuppression", "false"))
+                mandatory.add(MediaConstraints.KeyValuePair("googAutoGainControl", "false"))
+                mandatory.add(MediaConstraints.KeyValuePair("googHighpassFilter", "false"))
             }
             val audioSource = factory.createAudioSource(audioConstraints)
             val audioTrack = factory.createAudioTrack("audio-$streamId", audioSource)
@@ -240,7 +238,14 @@ class PeerConnectionManager(
                         )
                         return
                     }
-                    continuation.resume(sdp.description)
+                    // setLocalDescription immediately so ICE gathering starts before the offer is sent
+                    pc.setLocalDescription(object : SdpObserver {
+                        override fun onSetSuccess() = continuation.resume(sdp.description)
+                        override fun onSetFailure(error: String?) =
+                            continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "setLocalDescription failed"))
+                        override fun onCreateSuccess(sdp: SessionDescription?) {}
+                        override fun onCreateFailure(error: String?) {}
+                    }, sdp)
                 }
                 override fun onCreateFailure(error: String?) =
                     continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "createOffer failed"))
@@ -253,25 +258,13 @@ class PeerConnectionManager(
         return offerSdp
     }
 
-    override suspend fun applyPublishAnswer(localOffer: String, remoteAnswer: String) {
+    override suspend fun applyPublishAnswer(remoteAnswer: String) {
         val pc = publishingPC
             ?: throw BandwidthRTCError.PublishFailed("Publishing peer connection not available")
 
-        val offer = SessionDescription(SessionDescription.Type.OFFER, localOffer)
         val answer = SessionDescription(SessionDescription.Type.ANSWER, remoteAnswer)
 
-        // setLocalDescription(our offer)
-        suspendCoroutine { continuation ->
-            pc.setLocalDescription(object : SdpObserver {
-                override fun onSetSuccess() = continuation.resume(Unit)
-                override fun onSetFailure(error: String?) =
-                    continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "setLocalDescription failed"))
-                override fun onCreateSuccess(sdp: SessionDescription?) {}
-                override fun onCreateFailure(error: String?) {}
-            }, offer)
-        }
-
-        // setRemoteDescription(server's answer)
+        // setLocalDescription was already called in createPublishOffer; just apply the server's answer
         suspendCoroutine { continuation ->
             pc.setRemoteDescription(object : SdpObserver {
                 override fun onSetSuccess() = continuation.resume(Unit)
@@ -282,7 +275,7 @@ class PeerConnectionManager(
             }, answer)
         }
 
-        log.debug("Publish SDP answer applied (local offer + remote answer)")
+        log.debug("Publish SDP answer applied")
     }
 
     // MARK: - Subscribing
@@ -634,7 +627,20 @@ class PeerConnectionManager(
         }
 
         override fun onAddTrack(receiver: RtpReceiver?, streams: Array<out MediaStream>?) {
-            // Handled by onAddStream
+            // Under Unified Plan, onAddStream only fires for the initial stream.
+            // Renegotiations (e.g. PSTN leg joining after an earlier call) only fire
+            // onAddTrack, so we must also handle stream availability here.
+            if (pcType != PeerConnectionType.SUBSCRIBE) return
+            val track = receiver?.track() ?: return
+            if (track.kind() != MediaStreamTrack.AUDIO_TRACK_KIND) return
+
+            val stream = streams?.firstOrNull() ?: return
+            log.info("Track added on SUBSCRIBE PC: trackId=${track.id()}, streamId=${stream.id}, enabled=${track.enabled()}")
+
+            // We already confirmed audio above, so don't rely on stream.audioTracks
+            // being populated yet — the track may not be added to the stream by the
+            // time this callback fires on some WebRTC builds.
+            onStreamAvailable?.invoke(stream, listOf(MediaType.AUDIO))
         }
     }
 
