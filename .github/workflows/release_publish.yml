@@ -1,0 +1,47 @@
+name: Publish Release
+
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  id-token: write
+  contents: write
+
+jobs:
+  build-and-publish:
+    # Only run for production (non-pre-release) releases
+    if: ${{ !github.event.release.prerelease }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Extract version from tag
+        id: version
+        # Strip a leading "v" if present (v1.2.3 → 1.2.3)
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build AAR
+        run: ./gradlew :bandwidthrtc:assembleRelease
+
+      - name: Run unit tests
+        run: ./gradlew :bandwidthrtc:testReleaseUnitTest
+
+      - name: Upload AAR to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" \
+            "bandwidthrtc/build/outputs/aar/bandwidthrtc-release.aar#BandwidthRTC-${{ steps.version.outputs.VERSION }}.aar" \
+            --clobber \
+            --repo "${{ github.repository }}"
