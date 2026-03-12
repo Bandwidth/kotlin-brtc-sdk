@@ -4,6 +4,8 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
+version = rootProject.file("VERSION").readText().trim()
+
 android {
     namespace = "com.bandwidth.rtc"
     compileSdk = 34
