@@ -22,6 +22,6 @@ jobs:
           VERSION=$(cat VERSION)
           gh release create "v${VERSION}" \
             --draft \
-            --title "${VERSION}" \
+            --title "v${VERSION}" \
             --notes "## Changes" \
             --repo "${{ github.repository }}"
