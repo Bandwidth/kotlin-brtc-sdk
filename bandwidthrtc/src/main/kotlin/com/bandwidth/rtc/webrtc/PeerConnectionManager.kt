@@ -200,11 +200,12 @@ class PeerConnectionManager(
             // Disable WebRTC software audio processing for any feature handled by hardware
             // to avoid double processing. Fall back to software when hardware is unavailable
             // (e.g. emulators).
+            val ap = options?.audioProcessing ?: AudioProcessingOptions()
             val audioConstraints = MediaConstraints().apply {
-                mandatory.add(MediaConstraints.KeyValuePair("googEchoCancellation", "false"))
-                mandatory.add(MediaConstraints.KeyValuePair("googNoiseSuppression", "false"))
-                mandatory.add(MediaConstraints.KeyValuePair("googAutoGainControl", "false"))
-                mandatory.add(MediaConstraints.KeyValuePair("googHighpassFilter", "false"))
+                mandatory.add(MediaConstraints.KeyValuePair("googEchoCancellation", ap.enableSoftwareEchoCancellation.toString()))
+                mandatory.add(MediaConstraints.KeyValuePair("googNoiseSuppression", ap.enableSoftwareNoiseSuppression.toString()))
+                mandatory.add(MediaConstraints.KeyValuePair("googAutoGainControl", ap.enableAutoGainControl.toString()))
+                mandatory.add(MediaConstraints.KeyValuePair("googHighpassFilter", ap.enableHighpassFilter.toString()))
             }
             val audioSource = factory.createAudioSource(audioConstraints)
             val audioTrack = factory.createAudioTrack("audio-$streamId", audioSource)

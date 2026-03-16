@@ -4,6 +4,7 @@ import android.content.Context
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.os.Build
+import com.bandwidth.rtc.types.AudioProcessingOptions
 import com.bandwidth.rtc.util.Logger
 import org.webrtc.audio.AudioDeviceModule
 import org.webrtc.audio.JavaAudioDeviceModule
@@ -21,14 +22,11 @@ import org.webrtc.audio.JavaAudioDeviceModule
  * (remote audio) samples callback. Remote audio level monitoring can be done via
  * WebRTC stats (inbound-rtp audioLevel) instead.
  */
-class MixingAudioDevice(context: Context) {
+class MixingAudioDevice(context: Context, audioProcessing: AudioProcessingOptions = AudioProcessingOptions()) {
 
     private val log = Logger
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val previousAudioMode = audioManager.mode
-
-    val supportsHardwareAec = false
-    val supportsHardwareNs = false
 
     /** Called with Float32 audio samples for visualization after each mic capture chunk. */
     var onLocalAudioLevel: ((FloatArray) -> Unit)? = null
@@ -63,11 +61,21 @@ class MixingAudioDevice(context: Context) {
                     onLocalAudioLevel?.invoke(floatSamples)
                 }
             }
-            .setUseHardwareAcousticEchoCanceler(supportsHardwareAec)
-            .setUseHardwareNoiseSuppressor(supportsHardwareNs)
+            .setUseHardwareAcousticEchoCanceler(audioProcessing.enableHardwareAec)
+            .setUseHardwareNoiseSuppressor(audioProcessing.enableHardwareNoiseSuppressor)
+            .setAudioSource(audioProcessing.audioSource)
+            .setAudioFormat(audioProcessing.audioFormat)
+            .setUseStereoInput(audioProcessing.useStereoInput)
+            .setUseStereoOutput(audioProcessing.useStereoOutput)
+            .setUseLowLatency(audioProcessing.useLowLatency)
+            .also { builder ->
+                audioProcessing.inputSampleRate?.let { builder.setInputSampleRate(it) }
+                audioProcessing.outputSampleRate?.let { builder.setOutputSampleRate(it) }
+                audioProcessing.audioAttributes?.let { builder.setAudioAttributes(it) }
+            }
             .createAudioDeviceModule()
 
-        log.debug("MixingAudioDevice created (hardwareAec=$supportsHardwareAec, hardwareNs=$supportsHardwareNs)")
+        log.debug("MixingAudioDevice created (hardwareAec=${audioProcessing.enableHardwareAec}, hardwareNs=${audioProcessing.enableHardwareNoiseSuppressor})")
     }
 
     @Suppress("DEPRECATION")

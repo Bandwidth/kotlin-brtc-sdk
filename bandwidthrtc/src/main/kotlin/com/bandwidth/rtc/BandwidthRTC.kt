@@ -118,7 +118,7 @@ class BandwidthRTC(
 
             // Create the custom audio device
             Logger.info("Initializing mixing device...")
-            val mixing = MixingAudioDevice(context)
+            val mixing = MixingAudioDevice(context, options?.audioProcessing ?: AudioProcessingOptions())
             mixing.onLocalAudioLevel = { samples -> onLocalAudioLevel?.invoke(samples) }
             mixing.onRemoteAudioLevel = { samples -> onRemoteAudioLevel?.invoke(samples) }
             this.mixingDevice = mixing
