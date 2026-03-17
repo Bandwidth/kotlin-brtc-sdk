@@ -24,14 +24,15 @@ jobs:
           VERSION="v${{ steps.version.outputs.VERSION }}"
 
           # Check if draft release already exists
-          if gh release view "$VERSION" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            # Release exists, edit it with new notes
+          IS_DRAFT=$(gh release view "$VERSION" --repo "${{ github.repository }}" --json isDraft -q '.isDraft' 2>/dev/null)
+
+          if [ "$IS_DRAFT" = "true" ]; then
+            # Draft release exists, edit it with new notes
             gh release edit "$VERSION" \
-              --draft \
               --generate-notes \
               --repo "${{ github.repository }}"
           else
-            # Release doesn't exist, create it
+            # Release doesn't exist or is published, create new draft
             gh release create "$VERSION" \
               --draft \
               --title "$VERSION" \
