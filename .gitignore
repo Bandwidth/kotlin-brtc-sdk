@@ -46,3 +46,6 @@ ehthumbs.db
 
 # Dependency caches
 .cache/
+
+# Temporary files
+temp/
