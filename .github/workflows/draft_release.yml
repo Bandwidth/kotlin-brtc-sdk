@@ -23,16 +23,20 @@ jobs:
         run: |
           VERSION="v${{ steps.version.outputs.VERSION }}"
 
-          # Check if draft release already exists
-          IS_DRAFT=$(gh release view "$VERSION" --repo "${{ github.repository }}" --json isDraft -q '.isDraft' 2>/dev/null)
+          # Check if release already exists
+          RELEASE_EXISTS=$(gh release view "$VERSION" --repo "${{ github.repository }}" --json isDraft -q '.isDraft' 2>/dev/null)
 
-          if [ "$IS_DRAFT" = "true" ]; then
+          if [ "$RELEASE_EXISTS" = "true" ]; then
             # Draft release exists, edit it with new notes
             gh release edit "$VERSION" \
               --generate-notes \
               --repo "${{ github.repository }}"
+          elif [ "$RELEASE_EXISTS" = "false" ]; then
+            # Published release exists, fail
+            echo "::error::Release v$VERSION already exists and is published. Cannot create a new draft. Bump the version in the VERSION file to create a new release."
+            exit 1
           else
-            # Release doesn't exist or is published, create new draft
+            # Release doesn't exist, create new draft
             gh release create "$VERSION" \
               --draft \
               --title "$VERSION" \
