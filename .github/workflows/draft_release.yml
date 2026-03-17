@@ -19,8 +19,10 @@ jobs:
         id: version
         run: echo "VERSION=$(cat VERSION)" >> "$GITHUB_OUTPUT"
 
-      - uses: release-drafter/release-drafter@v7
-        with:
-          config-name: draft-release.yml
+      - name: Create draft release
+        run: |
+          gh release create v${{ steps.version.outputs.VERSION }} \
+            --draft \
+            --title "v${{ steps.version.outputs.VERSION }}"
         env:
-          GITHUB_ENV_VERSION: ${{ steps.version.outputs.VERSION }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

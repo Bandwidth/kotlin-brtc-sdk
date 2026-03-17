@@ -45,3 +45,23 @@ jobs:
             "bandwidthrtc/build/outputs/aar/bandwidthrtc-release.aar#BandwidthRTC-${{ steps.version.outputs.VERSION }}.aar" \
             --clobber \
             --repo "${{ github.repository }}"
+
+      - name: Create major/minor version tags
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          MAJOR=$(echo "$VERSION" | cut -d. -f1)
+          MINOR=$(echo "$VERSION" | cut -d. -f1-2)
+
+          # Create annotated tag for major version if it doesn't exist
+          if ! git rev-parse "v$MAJOR" >/dev/null 2>&1; then
+            git tag -a "v$MAJOR" -m "Release v$MAJOR series" "v$VERSION"
+            git push origin "v$MAJOR"
+          fi
+
+          # Create annotated tag for major.minor version if it doesn't exist
+          if ! git rev-parse "v$MINOR" >/dev/null 2>&1; then
+            git tag -a "v$MINOR" -m "Release v$MINOR series" "v$VERSION"
+            git push origin "v$MINOR"
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
