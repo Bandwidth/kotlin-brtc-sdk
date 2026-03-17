@@ -15,13 +15,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Create draft release
+      - name: Read version
+        id: version
+        run: echo "VERSION=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+
+      - uses: release-drafter/release-drafter@v7
+        with:
+          config-name: draft-release.yml
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          VERSION=$(cat VERSION)
-          gh release create "v${VERSION}" \
-            --draft \
-            --title "v${VERSION}" \
-            --notes "## Changes" \
-            --repo "${{ github.repository }}"
+          GITHUB_ENV_VERSION: ${{ steps.version.outputs.VERSION }}
