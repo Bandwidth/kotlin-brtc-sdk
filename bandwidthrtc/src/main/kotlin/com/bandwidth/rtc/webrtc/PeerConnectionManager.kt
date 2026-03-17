@@ -45,6 +45,7 @@ class PeerConnectionManager(
     // MARK: - Stream Tracking
 
     private val publishedStreams = ConcurrentHashMap<String, MediaStream>()
+    private val publishedAudioSources = ConcurrentHashMap<String, AudioSource>()
     private val subscribedStreamMetadata = ConcurrentHashMap<String, StreamMetadata>()
     var subscribeSdpRevision: Int = 0
         private set
@@ -208,6 +209,7 @@ class PeerConnectionManager(
                 mandatory.add(MediaConstraints.KeyValuePair("googHighpassFilter", ap.enableHighpassFilter.toString()))
             }
             val audioSource = factory.createAudioSource(audioConstraints)
+            publishedAudioSources[streamId] = audioSource
             val audioTrack = factory.createAudioTrack("audio-$streamId", audioSource)
             stream.addTrack(audioTrack)
             pc.addTrack(audioTrack, listOf(streamId))
@@ -386,8 +388,10 @@ class PeerConnectionManager(
                 log.debug("Removed sender for track ${track.id()}")
             }
             track.setEnabled(false)
+            track.dispose()
         }
 
+        publishedAudioSources.remove(streamId)?.dispose()
         publishedStreams.remove(streamId)
         log.debug("Removed local tracks for stream $streamId")
     }
@@ -515,12 +519,15 @@ class PeerConnectionManager(
     // MARK: - Cleanup
 
     override fun cleanup() {
-        for ((_, stream) in publishedStreams) {
+        for ((streamId, stream) in publishedStreams) {
             for (track in stream.audioTracks) {
                 track.setEnabled(false)
+                track.dispose()
             }
+            publishedAudioSources[streamId]?.dispose()
         }
         publishedStreams.clear()
+        publishedAudioSources.clear()
         subscribedStreamMetadata.clear()
 
         listOfNotNull(publishHeartbeatDC, publishDiagnosticsDC, subscribeHeartbeatDC, subscribeDiagnosticsDC)
@@ -537,6 +544,8 @@ class PeerConnectionManager(
         subscribingPC?.close()
         publishingPC = null
         subscribingPC = null
+
+        factory.dispose()
 
         subscribeSdpRevision = 0
         publishIceConnected = false

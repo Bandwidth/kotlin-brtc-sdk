@@ -110,12 +110,6 @@ class BandwidthRTC(
         if (peerConnectionManager != null) {
             pcMgr = peerConnectionManager!!
         } else {
-            // Clean up any stale state from a previous session
-            if (peerConnectionManager != null) {
-                Logger.warn("connect() called with stale state — cleaning up previous session")
-                cleanupSession()
-            }
-
             // Create the custom audio device
             Logger.info("Initializing mixing device...")
             val mixing = MixingAudioDevice(context, options?.audioProcessing ?: AudioProcessingOptions())
