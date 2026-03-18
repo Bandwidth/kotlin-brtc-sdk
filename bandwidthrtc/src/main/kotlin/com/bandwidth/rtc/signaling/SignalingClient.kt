@@ -58,7 +58,7 @@ internal class SignalingClient(
             append("&endpointToken=${authParams.endpointToken}")
         }
 
-        log.debug("Signaling Gateway URL: $url")
+        log.debug("Signaling Gateway URL: $baseUrl (uniqueId=$uniqueId)")
 
         val ws = webSocketFactory()
         this.webSocket = ws
