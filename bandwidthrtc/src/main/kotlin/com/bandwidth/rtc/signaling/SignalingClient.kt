@@ -7,7 +7,6 @@ import kotlinx.coroutines.*
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.encodeToJsonElement
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -34,17 +33,13 @@ internal class SignalingClient(
     private var pingJob: Job? = null
     private var scope: CoroutineScope? = null
 
-    // JSON-RPC request/response correlation
     private val pendingRequests = ConcurrentHashMap<String, Continuation<JsonElement?>>()
     private var nextRequestId = 1
 
-    // Event handlers for server notifications
     private val eventHandlers = ConcurrentHashMap<String, (String) -> Unit>()
 
     var isConnected = false
         private set
-
-    // MARK: - Connection
 
     override suspend fun connect(authParams: RtcAuthParams, options: RtcOptions?) {
         log.info("SignalingClient.connect() called")
@@ -112,7 +107,6 @@ internal class SignalingClient(
     override suspend fun disconnect() {
         log.info("SignalingClient.disconnect() called")
 
-        // Send leave notification (fire-and-forget)
         try {
             sendNotification("leave", json.encodeToJsonElement(EmptyParams()))
             log.debug("Leave notification sent")
@@ -129,7 +123,6 @@ internal class SignalingClient(
         webSocket = null
         isConnected = false
 
-        // Fail any pending requests
         log.debug("Failing ${pendingRequests.size} pending requests due to disconnect")
         for ((_, continuation) in pendingRequests) {
             continuation.resumeWithException(BandwidthRTCError.WebSocketDisconnected())
@@ -137,8 +130,6 @@ internal class SignalingClient(
         pendingRequests.clear()
         log.info("SignalingClient disconnected")
     }
-
-    // MARK: - Event Handlers
 
     override fun onEvent(method: String, handler: (String) -> Unit) {
         log.debug("Registering event handler for: $method")
@@ -149,8 +140,6 @@ internal class SignalingClient(
         log.debug("Removing event handler for: $method")
         eventHandlers.remove(method)
     }
-
-    // MARK: - RPC Methods
 
     override suspend fun setMediaPreferences(): SetMediaPreferencesResult {
         log.debug("SignalingClient.setMediaPreferences()")
@@ -189,8 +178,6 @@ internal class SignalingClient(
             ?: return HangupResult().also { log.warn("hangupConnection returned null") }
         return json.decodeFromJsonElement(HangupResult.serializer(), result)
     }
-
-    // MARK: - Private: JSON-RPC Call/Notify
 
     private suspend fun call(method: String, params: JsonElement): JsonElement? {
         val ws = webSocket
@@ -235,8 +222,6 @@ internal class SignalingClient(
         nextRequestId++
         return id.toString()
     }
-
-    // MARK: - Private: Message Handling
 
     private fun handleMessage(text: String) {
         log.debug("<<< WS received: ${if (text.length > 500) text.take(500) + "..." else text}")
@@ -299,7 +284,6 @@ internal class SignalingClient(
 
         log.info("SignalingClient.handleDisconnect() wasConnected=$wasConnected")
 
-        // Fail all pending requests
         if (pendingRequests.isNotEmpty()) {
             log.debug("Failing ${pendingRequests.size} pending requests due to disconnect")
             for ((_, continuation) in pendingRequests) {
@@ -309,15 +293,11 @@ internal class SignalingClient(
         }
 
         if (wasConnected) {
-            log.debug("Triggering 'close' event handler")
             eventHandlers["close"]?.invoke("")
         }
     }
 
-    // MARK: - Private: Ping Keepalive
-
     private fun startPingLoop() {
-        log.debug("Starting ping loop (interval=${PING_INTERVAL_MS}ms)")
         pingJob = scope?.launch {
             while (isActive) {
                 delay(PING_INTERVAL_MS)

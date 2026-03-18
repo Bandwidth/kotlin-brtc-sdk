@@ -32,8 +32,6 @@ class BandwidthRTC(
     logLevel: LogLevel = LogLevel.WARN
 ) {
 
-    // MARK: - Public Callbacks
-
     /** Called when a new remote stream becomes available. */
     var onStreamAvailable: ((RtcStream) -> Unit)? = null
 
@@ -52,8 +50,6 @@ class BandwidthRTC(
     /** Called with Float32 audio samples for visualization after each remote audio playout chunk. */
     var onRemoteAudioLevel: ((FloatArray) -> Unit)? = null
 
-    // MARK: - Internal Components
-
     internal var signaling: SignalingClientInterface? = null
     internal var peerConnectionManager: PeerConnectionManagerInterface? = null
     private var options: RtcOptions? = null
@@ -61,8 +57,6 @@ class BandwidthRTC(
     /** Custom audio device — owns mic capture and remote audio playout. */
     var mixingDevice: MixingAudioDevice? = null
         private set
-
-    // MARK: - State
 
     var isConnected: Boolean = false
         private set
@@ -74,7 +68,6 @@ class BandwidthRTC(
         Logger.level = logLevel
     }
 
-    /** Internal constructor for testing — injects mock signaling and peer connection manager. */
     @Suppress("unused")
     internal constructor(
         context: Context,
@@ -86,8 +79,6 @@ class BandwidthRTC(
         this.peerConnectionManager = peerConnectionManager
     }
 
-    // MARK: - Connection
-
     /** Connect to the BRTC platform using a JWT endpoint token. */
     suspend fun connect(authParams: RtcAuthParams, options: RtcOptions? = null) {
         Logger.info("BandwidthRTC connect() called")
@@ -95,29 +86,23 @@ class BandwidthRTC(
 
         this.options = options
 
-        // Use injected signaling or create new
         val sig: SignalingClientInterface = signaling ?: SignalingClient().also { signaling = it }
 
-        // Register event handlers before connecting
         registerEventHandlers(sig)
 
-        // Connect WebSocket
         Logger.info("Connecting signaling...")
         sig.connect(authParams = authParams, options = options)
 
-        // Use injected peer connection manager or create new
         val pcMgr: PeerConnectionManagerInterface
         if (peerConnectionManager != null) {
             pcMgr = peerConnectionManager!!
         } else {
-            // Create the custom audio device
             Logger.info("Initializing mixing device...")
             val mixing = MixingAudioDevice(context, options?.audioProcessing ?: AudioProcessingOptions())
             mixing.onLocalAudioLevel = { samples -> onLocalAudioLevel?.invoke(samples) }
             mixing.onRemoteAudioLevel = { samples -> onRemoteAudioLevel?.invoke(samples) }
             this.mixingDevice = mixing
 
-            // Set up peer connections with the custom audio device module
             Logger.info("Initializing peer connection manager...")
             val newPCMgr = PeerConnectionManager(context, options, mixing.audioDeviceModule)
             this.peerConnectionManager = newPCMgr
@@ -126,7 +111,6 @@ class BandwidthRTC(
             pcMgr = newPCMgr
         }
 
-        // Wire up peer connection callbacks
         pcMgr.onStreamAvailable = { stream, mediaTypes ->
             val rtcStream = RtcStream(mediaStream = stream, mediaTypes = mediaTypes)
             Logger.info("onStreamAvailable: ${rtcStream.streamId}")
@@ -146,14 +130,12 @@ class BandwidthRTC(
             }
         }
 
-        // Send setMediaPreferences to initiate the signaling flow
         Logger.info("Sending setMediaPreferences...")
         val mediaResult = sig.setMediaPreferences()
         Logger.debug("setMediaPreferences result: endpoint=${mediaResult.endpointId}, hasPublishOffer=${mediaResult.publishSdpOffer != null}, hasSubscribeOffer=${mediaResult.subscribeSdpOffer != null}")
 
-        // Answer BOTH initial SDP offers immediately (no tracks)
         mediaResult.publishSdpOffer?.sdpOffer?.let { publishOffer ->
-            Logger.debug("Answering initial publish SDP offer (no tracks)...")
+            Logger.debug("Answering initial publish SDP offer...")
             val publishAnswer = pcMgr.answerInitialOffer(sdpOffer = publishOffer, pcType = PeerConnectionType.PUBLISH)
             sig.answerSdp(sdpAnswer = publishAnswer, peerType = "publish")
             Logger.debug("Initial publish SDP answer sent")
@@ -183,8 +165,6 @@ class BandwidthRTC(
         Logger.info("Disconnected from BRTC")
     }
 
-    // MARK: - Private: Session Cleanup
-
     private suspend fun cleanupSession() {
         Logger.info("Cleaning up session...")
         peerConnectionManager?.cleanup()
@@ -196,8 +176,6 @@ class BandwidthRTC(
         isConnected = false
     }
 
-    // MARK: - Publishing
-
     /** Publish local audio. Adds local tracks, then creates a client-initiated offer sent via offerSdp. */
     suspend fun publish(audio: Boolean = true, alias: String? = null): RtcStream {
         Logger.info("BandwidthRTC publish() called audio=$audio alias=$alias")
@@ -207,23 +185,18 @@ class BandwidthRTC(
             throw BandwidthRTCError.NotConnected()
         }
 
-        // 1. Wait for the publish PC's initial ICE handshake to complete
         Logger.debug("Waiting for publish PC ICE to connect...")
         pcManager.waitForPublishIceConnected()
         Logger.debug("Publish PC ICE connected — proceeding with publish")
 
-        // 2. Add local audio track to the publishing peer connection
         val mediaStream = pcManager.addLocalTracks(audio = audio)
 
-        // 3. Create a client-initiated offer with the newly added tracks
         val localOffer = pcManager.createPublishOffer()
         Logger.debug("Created publish offer with local tracks")
 
-        // 4. Send the offer to the server via offerSdp — server returns an SDP answer
         val result = signalingClient.offerSdp(sdpOffer = localOffer, peerType = "publish")
         Logger.debug("Server answered publish offer")
 
-        // 5. Apply the server's answer
         pcManager.applyPublishAnswer(remoteAnswer = result.sdpAnswer)
         Logger.debug("Publish SDP exchange complete")
 
@@ -252,8 +225,6 @@ class BandwidthRTC(
 
         Logger.info("Unpublished stream ${stream.streamId}")
     }
-
-    // MARK: - Media Control
 
     /** Enable or disable the microphone for all published streams. */
     fun setMicEnabled(enabled: Boolean) {
@@ -289,18 +260,12 @@ class BandwidthRTC(
             previousOutboundBytes = previousSnapshot?.bytesSent ?: 0,
             previousTimestamp = previousSnapshot?.timestamp ?: 0.0,
         ) { snapshot ->
-            // Synthesize remote audio samples from the stats audioLevel so the
-            // onRemoteAudioLevel callback (and waveform visualization) gets driven.
-            // Android's WebRTC SDK has no playout-tap callback, so we use the
-            // inbound-rtp audioLevel stat (0.0–1.0 linear amplitude) instead.
             val level = snapshot.audioLevel.toFloat()
             val samples = FloatArray(9600) { level }
             onRemoteAudioLevel?.invoke(samples)
             completion(snapshot)
         }
     }
-
-    // MARK: - Call Control (Low-Level)
 
     /** Request an outbound connection to a phone number, endpoint, or call ID. */
     suspend fun requestOutboundConnection(id: String, type: EndpointType): OutboundConnectionResult {
@@ -318,17 +283,12 @@ class BandwidthRTC(
         return sig.hangupConnection(endpoint = endpoint, type = type)
     }
 
-    // MARK: - Configuration
-
     /** Set the SDK log level. */
     fun setLogLevel(level: LogLevel) {
         Logger.level = level
     }
 
-    // MARK: - Private: Event Handlers
-
     private fun registerEventHandlers(signaling: SignalingClientInterface) {
-        // Handle incoming SDP offers for subscribing
         signaling.onEvent("sdpOffer") { data ->
             Logger.info("Signaling event: sdpOffer")
             scope.launch {
@@ -336,7 +296,6 @@ class BandwidthRTC(
             }
         }
 
-        // Handle ready event
         signaling.onEvent("ready") { data ->
             Logger.info("Signaling event: ready")
             val metadata: ReadyMetadata = if (data.isEmpty()) {
@@ -352,13 +311,10 @@ class BandwidthRTC(
             onReady?.invoke(metadata)
         }
 
-        // Handle established event
         signaling.onEvent("established") {
             Logger.info("Signaling event: established")
-            Logger.debug("Connection established")
         }
 
-        // Handle disconnect
         signaling.onEvent("close") {
             Logger.info("Signaling event: close")
             Logger.warn("WebSocket closed")
@@ -367,7 +323,7 @@ class BandwidthRTC(
     }
 
     private suspend fun handleSubscribeSdpOffer(data: String) {
-        Logger.debug(">>> Subscribe SDP offer received (${data.length} chars)")
+        Logger.debug("Subscribe SDP offer received (${data.length} chars)")
 
         val pcManager = peerConnectionManager
         val sig = signaling
@@ -395,7 +351,7 @@ class BandwidthRTC(
 
             sig.answerSdp(sdpAnswer = answerSdp, peerType = "subscribe")
 
-            Logger.debug("<<< Subscribe SDP answer sent (revision=${notification.sdpRevision})")
+            Logger.debug("Subscribe SDP answer sent (revision=${notification.sdpRevision})")
         } catch (e: Exception) {
             Logger.error("Failed to handle subscribe SDP offer: ${e.message}")
         }

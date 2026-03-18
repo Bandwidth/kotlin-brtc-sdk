@@ -13,14 +13,8 @@ import org.webrtc.audio.JavaAudioDeviceModule
  * Audio device wrapper that provides mic capture with visualization callbacks
  * for audio levels.
  *
- * On Android, WebRTC's JavaAudioDeviceModule handles the low-level audio I/O.
- * This class wraps it to provide audio level callbacks for visualization,
- * analogous to the Swift SDK's MixingAudioDevice.
- *
- * Note: The Android WebRTC SDK only provides a recording (mic) samples callback
- * via [JavaAudioDeviceModule.SamplesReadyCallback]. There is no built-in playout
- * (remote audio) samples callback. Remote audio level monitoring can be done via
- * WebRTC stats (inbound-rtp audioLevel) instead.
+ * Wraps [JavaAudioDeviceModule] to provide audio level callbacks for visualization.
+ * Remote audio level monitoring is driven via WebRTC stats (inbound-rtp audioLevel).
  */
 class MixingAudioDevice(context: Context, audioProcessing: AudioProcessingOptions = AudioProcessingOptions()) {
 
@@ -31,8 +25,7 @@ class MixingAudioDevice(context: Context, audioProcessing: AudioProcessingOption
     /** Called with Float32 audio samples for visualization after each mic capture chunk. */
     var onLocalAudioLevel: ((FloatArray) -> Unit)? = null
 
-    /** Called with Float32 audio samples for visualization after each remote audio playout chunk.
-     *  Note: On Android, this is driven by WebRTC stats polling rather than a direct playout tap. */
+    /** Called with Float32 audio samples for visualization after each remote audio playout chunk. */
     var onRemoteAudioLevel: ((FloatArray) -> Unit)? = null
 
     /** The underlying WebRTC audio device module. */

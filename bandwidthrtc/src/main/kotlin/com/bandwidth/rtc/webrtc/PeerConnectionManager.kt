@@ -6,7 +6,6 @@ import com.bandwidth.rtc.util.Logger
 import kotlinx.coroutines.delay
 import org.webrtc.*
 import org.webrtc.audio.AudioDeviceModule
-import org.webrtc.audio.JavaAudioDeviceModule
 import java.nio.ByteBuffer
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -22,27 +21,19 @@ class PeerConnectionManager(
 
     private val log = Logger
 
-    // MARK: - Peer Connection Factory
-
     companion object {
         private var factoryInitialized = false
     }
 
     private val factory: PeerConnectionFactory
 
-    // MARK: - Peer Connections
-
     private var publishingPC: PeerConnection? = null
     private var subscribingPC: PeerConnection? = null
-
-    // MARK: - Data Channels
 
     private var publishHeartbeatDC: DataChannel? = null
     private var publishDiagnosticsDC: DataChannel? = null
     private var subscribeHeartbeatDC: DataChannel? = null
     private var subscribeDiagnosticsDC: DataChannel? = null
-
-    // MARK: - Stream Tracking
 
     private val publishedStreams = ConcurrentHashMap<String, MediaStream>()
     private val publishedAudioSources = ConcurrentHashMap<String, AudioSource>()
@@ -50,18 +41,12 @@ class PeerConnectionManager(
     var subscribeSdpRevision: Int = 0
         private set
 
-    // MARK: - Callbacks
-
     override var onStreamAvailable: ((MediaStream, List<MediaType>) -> Unit)? = null
     override var onStreamUnavailable: ((String) -> Unit)? = null
-    var onPublishingIceConnectionStateChange: ((PeerConnection.IceConnectionState) -> Unit)? = null
     override var onSubscribingIceConnectionStateChange: ((PeerConnection.IceConnectionState) -> Unit)? = null
 
-    // ICE connected flag
     @Volatile
     private var publishIceConnected = false
-
-    // MARK: - Init
 
     init {
         if (!factoryInitialized) {
@@ -80,8 +65,6 @@ class PeerConnectionManager(
         factory = builder.createPeerConnectionFactory()
     }
 
-    // MARK: - RTCConfiguration
-
     private fun createRtcConfiguration(): PeerConnection.RTCConfiguration {
         val iceServers = options?.iceServers ?: emptyList()
         val config = PeerConnection.RTCConfiguration(iceServers)
@@ -92,8 +75,6 @@ class PeerConnectionManager(
         return config
     }
 
-    // MARK: - Peer Connection Setup
-
     override fun setupPublishingPeerConnection(): PeerConnection {
         val config = createRtcConfiguration()
 
@@ -101,10 +82,6 @@ class PeerConnectionManager(
             config,
             PeerConnectionObserver(PeerConnectionType.PUBLISH)
         ) ?: throw BandwidthRTCError.ConnectionFailed("Failed to create publishing peer connection")
-
-        // Don't pre-create data channels — all data channels (__heartbeat__, __diagnostics__)
-        // are created by the server in-band via the SDP and received via
-        // the onDataChannel delegate callback.
 
         this.publishingPC = pc
         log.debug("Publishing peer connection created")
@@ -119,12 +96,8 @@ class PeerConnectionManager(
             PeerConnectionObserver(PeerConnectionType.SUBSCRIBE)
         ) ?: throw BandwidthRTCError.ConnectionFailed("Failed to create subscribing peer connection")
 
-        // Don't pre-create data channels on the subscribe PC.
-        // The server's SDP includes an m=application section that handles
-        // data channel setup in-band.
-
         this.subscribingPC = pc
-        log.debug("Subscribing peer connection created (no pre-created data channels)")
+        log.debug("Subscribing peer connection created")
         return pc
     }
 
@@ -138,8 +111,6 @@ class PeerConnectionManager(
         }
     }
 
-    // MARK: - Initial SDP Handshake
-
     override suspend fun answerInitialOffer(sdpOffer: String, pcType: PeerConnectionType): String {
         val pc = when (pcType) {
             PeerConnectionType.PUBLISH -> publishingPC
@@ -148,7 +119,6 @@ class PeerConnectionManager(
 
         val offer = SessionDescription(SessionDescription.Type.OFFER, sdpOffer)
 
-        // setRemoteDescription
         suspendCoroutine { continuation ->
             pc.setRemoteDescription(object : SdpObserver {
                 override fun onSetSuccess() = continuation.resume(Unit)
@@ -159,7 +129,6 @@ class PeerConnectionManager(
             }, offer)
         }
 
-        // createAnswer
         val answerConstraints = MediaConstraints()
         val answerSdp = suspendCoroutine { continuation ->
             pc.createAnswer(object : SdpObserver {
@@ -170,7 +139,6 @@ class PeerConnectionManager(
                         )
                         return
                     }
-                    // setLocalDescription
                     pc.setLocalDescription(object : SdpObserver {
                         override fun onSetSuccess() = continuation.resume(sdp.description)
                         override fun onSetFailure(error: String?) =
@@ -189,8 +157,6 @@ class PeerConnectionManager(
         return answerSdp
     }
 
-    // MARK: - Publishing
-
     override fun addLocalTracks(audio: Boolean): MediaStream {
         val pc = publishingPC ?: throw BandwidthRTCError.PublishFailed("Publishing peer connection not set up")
 
@@ -198,9 +164,6 @@ class PeerConnectionManager(
         val stream = factory.createLocalMediaStream(streamId)
 
         if (audio) {
-            // Disable WebRTC software audio processing for any feature handled by hardware
-            // to avoid double processing. Fall back to software when hardware is unavailable
-            // (e.g. emulators).
             val ap = options?.audioProcessing ?: AudioProcessingOptions()
             val audioConstraints = MediaConstraints().apply {
                 mandatory.add(MediaConstraints.KeyValuePair("googEchoCancellation", ap.enableSoftwareEchoCancellation.toString()))
@@ -226,7 +189,6 @@ class PeerConnectionManager(
         val pc = publishingPC
             ?: throw BandwidthRTCError.PublishFailed("Publishing peer connection not available")
 
-        // send-only publish PC
         val offerConstraints = MediaConstraints().apply {
             mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveAudio", "false"))
             mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveVideo", "false"))
@@ -241,7 +203,6 @@ class PeerConnectionManager(
                         )
                         return
                     }
-                    // setLocalDescription immediately so ICE gathering starts before the offer is sent
                     pc.setLocalDescription(object : SdpObserver {
                         override fun onSetSuccess() = continuation.resume(sdp.description)
                         override fun onSetFailure(error: String?) =
@@ -257,7 +218,7 @@ class PeerConnectionManager(
             }, offerConstraints)
         }
 
-        log.debug("Publish SDP offer created (client-initiated)")
+        log.debug("Publish SDP offer created")
         return offerSdp
     }
 
@@ -267,7 +228,6 @@ class PeerConnectionManager(
 
         val answer = SessionDescription(SessionDescription.Type.ANSWER, remoteAnswer)
 
-        // setLocalDescription was already called in createPublishOffer; just apply the server's answer
         suspendCoroutine { continuation ->
             pc.setRemoteDescription(object : SdpObserver {
                 override fun onSetSuccess() = continuation.resume(Unit)
@@ -281,8 +241,6 @@ class PeerConnectionManager(
         log.debug("Publish SDP answer applied")
     }
 
-    // MARK: - Subscribing
-
     override suspend fun handleSubscribeSdpOffer(
         sdpOffer: String,
         sdpRevision: Int?,
@@ -290,7 +248,6 @@ class PeerConnectionManager(
     ): String {
         val effectiveRevision = sdpRevision ?: (subscribeSdpRevision + 1)
 
-        // Reject stale offers (but always accept the first one)
         if (effectiveRevision <= subscribeSdpRevision && subscribeSdpRevision != 0) {
             log.warn("Rejecting stale SDP offer (revision $effectiveRevision <= $subscribeSdpRevision)")
             throw BandwidthRTCError.SdpNegotiationFailed("Stale SDP offer")
@@ -305,17 +262,15 @@ class PeerConnectionManager(
 
         log.debug("[subscribe] Handling offer (revision=$effectiveRevision)")
 
-        // Update metadata
         metadata?.let { subscribedStreamMetadata.putAll(it) }
 
         val offer = SessionDescription(SessionDescription.Type.OFFER, sdpOffer)
 
-        // Step 1: setRemoteDescription
-        log.debug("[subscribe] Step 1: setRemoteDescription...")
+        log.debug("[subscribe] setRemoteDescription...")
         suspendCoroutine { continuation ->
             pc.setRemoteDescription(object : SdpObserver {
                 override fun onSetSuccess() {
-                    log.debug("[subscribe] Step 1: setRemoteDescription SUCCESS")
+                    log.debug("[subscribe] setRemoteDescription SUCCESS")
                     continuation.resume(Unit)
                 }
                 override fun onSetFailure(error: String?) {
@@ -327,8 +282,7 @@ class PeerConnectionManager(
             }, offer)
         }
 
-        // Step 2: createAnswer + Step 3: setLocalDescription
-        log.debug("[subscribe] Step 2: createAnswer...")
+        log.debug("[subscribe] createAnswer...")
         val answerConstraints = MediaConstraints()
 
         val answerSdp = suspendCoroutine { continuation ->
@@ -342,11 +296,10 @@ class PeerConnectionManager(
                         return
                     }
 
-                    // Step 3: setLocalDescription
-                    log.debug("[subscribe] Step 3: setLocalDescription...")
+                    log.debug("[subscribe] setLocalDescription...")
                     pc.setLocalDescription(object : SdpObserver {
                         override fun onSetSuccess() {
-                            log.debug("[subscribe] Step 3: setLocalDescription SUCCESS")
+                            log.debug("[subscribe] setLocalDescription SUCCESS")
                             continuation.resume(sdp.description)
                         }
                         override fun onSetFailure(error: String?) {
@@ -370,8 +323,6 @@ class PeerConnectionManager(
         log.debug("[subscribe] Complete (revision=$effectiveRevision)")
         return answerSdp
     }
-
-    // MARK: - Media Control
 
     override fun removeLocalTracks(streamId: String) {
         val pc = publishingPC ?: return
@@ -404,8 +355,6 @@ class PeerConnectionManager(
         }
     }
 
-    // MARK: - DTMF
-
     override fun sendDtmf(tone: String) {
         val pc = publishingPC ?: return
 
@@ -421,8 +370,6 @@ class PeerConnectionManager(
         }
         log.warn("No audio sender found for DTMF")
     }
-
-    // MARK: - Structured Stats
 
     override fun getCallStats(
         previousInboundBytes: Int,
@@ -451,7 +398,6 @@ class PeerConnectionManager(
             }
         }
 
-        // Inbound stats from subscribe PC
         val subPC = subscribingPC
         if (subPC != null) {
             synchronized(lock) { pendingCount++ }
@@ -476,7 +422,6 @@ class PeerConnectionManager(
                         }
                     }
                 }
-                // Resolve codec name
                 if (codecId != null) {
                     val codecStat = report.statsMap[codecId]
                     if (codecStat != null) {
@@ -490,7 +435,6 @@ class PeerConnectionManager(
             })
         }
 
-        // Outbound stats from publish PC
         val pubPC = publishingPC
         if (pubPC != null) {
             synchronized(lock) { pendingCount++ }
@@ -508,15 +452,12 @@ class PeerConnectionManager(
             })
         }
 
-        // If no PCs, complete immediately
         synchronized(lock) {
             if (pendingCount == 0) {
                 completion(snapshot)
             }
         }
     }
-
-    // MARK: - Cleanup
 
     override fun cleanup() {
         for ((streamId, stream) in publishedStreams) {
@@ -552,8 +493,6 @@ class PeerConnectionManager(
         log.info("Peer connections cleaned up")
     }
 
-    // MARK: - PeerConnection.Observer
-
     private inner class PeerConnectionObserver(
         private val pcType: PeerConnectionType
     ) : PeerConnection.Observer {
@@ -566,7 +505,6 @@ class PeerConnectionManager(
             log.debug("ICE connection state [$pcType]: $state")
 
             if (pcType == PeerConnectionType.PUBLISH) {
-                state?.let { onPublishingIceConnectionStateChange?.invoke(it) }
                 if (state == PeerConnection.IceConnectionState.CONNECTED ||
                     state == PeerConnection.IceConnectionState.COMPLETED
                 ) {
@@ -586,7 +524,6 @@ class PeerConnectionManager(
         }
 
         override fun onIceCandidate(candidate: IceCandidate?) {
-            // No ICE trickle — candidates are bundled in SDP
             log.debug("ICE candidate generated (bundled in SDP)")
         }
 
@@ -637,9 +574,6 @@ class PeerConnectionManager(
         }
 
         override fun onAddTrack(receiver: RtpReceiver?, streams: Array<out MediaStream>?) {
-            // Under Unified Plan, onAddStream only fires for the initial stream.
-            // Renegotiations (e.g. PSTN leg joining after an earlier call) only fire
-            // onAddTrack, so we must also handle stream availability here.
             if (pcType != PeerConnectionType.SUBSCRIBE) return
             val track = receiver?.track() ?: return
             if (track.kind() != MediaStreamTrack.AUDIO_TRACK_KIND) return
@@ -647,14 +581,9 @@ class PeerConnectionManager(
             val stream = streams?.firstOrNull() ?: return
             log.info("Track added on SUBSCRIBE PC: trackId=${track.id()}, streamId=${stream.id}, enabled=${track.enabled()}")
 
-            // We already confirmed audio above, so don't rely on stream.audioTracks
-            // being populated yet — the track may not be added to the stream by the
-            // time this callback fires on some WebRTC builds.
             onStreamAvailable?.invoke(stream, listOf(MediaType.AUDIO))
         }
     }
-
-    // MARK: - DataChannel.Observer
 
     private inner class DataChannelObserver(
         private val dataChannel: DataChannel
