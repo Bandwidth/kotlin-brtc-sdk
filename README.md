@@ -289,13 +289,15 @@ brtc.onRemoteAudioLevel = { samples: FloatArray ->
 To place an outbound call to a phone number:
 
 ```kotlin
+val phoneNumber = "+15551234567"
+
 val result = brtc.requestOutboundConnection(
-    id = "+15551234567",
+    id = phoneNumber,
     type = EndpointType.PHONE_NUMBER
 )
 
 // Later, to hang up:
-brtc.hangupConnection(endpoint = result.endpoint, type = EndpointType.PHONE_NUMBER)
+brtc.hangupConnection(endpoint = phoneNumber, type = EndpointType.PHONE_NUMBER)
 ```
 
 `EndpointType` values: `ENDPOINT`, `CALL_ID`, `PHONE_NUMBER`.
