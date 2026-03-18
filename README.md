@@ -154,15 +154,35 @@ A JWT endpoint token issued by the Bandwidth platform. Pass it to `connect()`.
 
 ### `RtcOptions`
 
-Optional overrides for connection behavior:
+Optional overrides for connection behavior. All fields are optional.
 
-```kotlin
-RtcOptions(
-    websocketUrl: String? = null,          // Override the default gateway URL
-    iceServers: List<PeerConnection.IceServer>? = null,  // Custom ICE/TURN servers
-    iceTransportPolicy: PeerConnection.IceTransportsType? = null
-)
-```
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `websocketUrl` | `String?` | `null` | Override the default BRTC gateway WebSocket URL |
+| `iceServers` | `List<PeerConnection.IceServer>?` | `null` | Custom STUN/TURN servers. Uses WebRTC defaults when `null` |
+| `iceTransportPolicy` | `PeerConnection.IceTransportsType?` | `null` (all) | Restrict ICE candidate types (e.g. `RELAY` to force TURN) |
+| `audioProcessing` | `AudioProcessingOptions` | See below | Audio source, format, and processing configuration |
+
+### `AudioProcessingOptions`
+
+Nested inside `RtcOptions.audioProcessing`. All fields are optional.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `enableHardwareAec` | `Boolean` | `false` | Enable hardware acoustic echo cancellation |
+| `enableHardwareNoiseSuppressor` | `Boolean` | `false` | Enable hardware noise suppressor |
+| `enableSoftwareEchoCancellation` | `Boolean` | `false` | Enable WebRTC software echo cancellation |
+| `enableSoftwareNoiseSuppression` | `Boolean` | `false` | Enable WebRTC software noise suppression |
+| `enableAutoGainControl` | `Boolean` | `false` | Enable WebRTC automatic gain control |
+| `enableHighpassFilter` | `Boolean` | `false` | Enable WebRTC highpass filter |
+| `audioSource` | `Int` | `VOICE_COMMUNICATION` | Android `MediaRecorder.AudioSource`. `VOICE_COMMUNICATION` enables hardware AEC and AGC on most devices |
+| `audioFormat` | `Int` | `ENCODING_PCM_16BIT` | PCM encoding format (`AudioFormat.ENCODING_*`) |
+| `inputSampleRate` | `Int?` | `null` | Recording sample rate in Hz. `null` uses the device default |
+| `outputSampleRate` | `Int?` | `null` | Playout sample rate in Hz. `null` uses the device default |
+| `useStereoInput` | `Boolean` | `false` | Capture in stereo instead of mono |
+| `useStereoOutput` | `Boolean` | `false` | Play back in stereo instead of mono |
+| `useLowLatency` | `Boolean` | `false` | Request a low-latency audio path (API 26+). Reduces latency at the cost of higher CPU usage |
+| `audioAttributes` | `AudioAttributes?` | `null` | Custom `AudioAttributes` for playback routing (e.g. to target a specific audio usage or content type) |
 
 ---
 

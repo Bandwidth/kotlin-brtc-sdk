@@ -77,9 +77,11 @@ BandwidthRTC (public API)
 
 ### Audio
 
-- Hardware AEC is assumed via `AudioManager.MODE_IN_COMMUNICATION`; WebRTC software echo cancellation, noise suppression, AGC, and highpass filter are all **disabled** in `addLocalTracks`.
+- All WebRTC software audio processing (echo cancellation, noise suppression, AGC, highpass filter) is **disabled by default** via `AudioProcessingOptions`. Callers opt in explicitly.
+- Hardware AEC/NS are also opt-in via `AudioProcessingOptions.enableHardwareAec` / `enableHardwareNoiseSuppressor`. The default `audioSource` (`VOICE_COMMUNICATION`) enables OS-level AEC on most devices independently of these flags.
 - `MixingAudioDevice` wraps `JavaAudioDeviceModule`. It taps raw 16-bit PCM from the mic and normalizes to `FloatArray` for `onLocalAudioLevel`.
 - Speaker routing: `setCommunicationDevice` on API ≥ 31, deprecated `isSpeakerphoneOn` setter below that.
+- `AudioProcessingOptions` is passed through `RtcOptions.audioProcessing` to `MixingAudioDevice` and `PeerConnectionManager` at `connect()` time; it cannot be changed mid-call.
 
 ---
 
@@ -106,7 +108,7 @@ BandwidthRTC (public API)
 | `hangupConnection(endpoint, type)` | `suspend` | Hang up a connection |
 | `setLogLevel(level)` | fun | Runtime log verbosity |
 
-`RtcOptions` lets callers override the WebSocket URL, ICE servers, and ICE transport policy.
+`RtcOptions` lets callers override the WebSocket URL, ICE servers, ICE transport policy, and audio processing behavior via `AudioProcessingOptions`.
 
 ---
 
@@ -116,7 +118,8 @@ BandwidthRTC (public API)
 |------|----------|-------|
 | `BandwidthRTCError` | `types/` | `sealed class` — all SDK errors extend this |
 | `RtcAuthParams` | `types/` | Just `endpointToken: String` |
-| `RtcOptions` | `types/` | Optional overrides for URL, ICE, transport policy |
+| `RtcOptions` | `types/` | Optional overrides for URL, ICE, transport policy, and `audioProcessing` |
+| `AudioProcessingOptions` | `types/` | Hardware/software AEC, NS, AGC, highpass filter; audio source, format, sample rates, stereo, low-latency, custom `AudioAttributes` |
 | `RtcStream` | `types/` | Wraps `MediaStream`; exposes `streamId`, `mediaTypes`, `alias` |
 | `ReadyMetadata` | `types/` | `endpointId`, `deviceId`, `territory`, `region` |
 | `CallStatsSnapshot` | `types/` | Packet/byte/jitter/bitrate/RTT/codec snapshot |
