@@ -17,26 +17,26 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Read VERSION
+        run: echo "VERSION=$(cat VERSION)" >> "$GITHUB_ENV"
+
       - name: Check VERSION against existing tags
         if: github.ref != 'refs/heads/main' && github.ref != 'refs/heads/master'
         run: |
-          CURRENT_VERSION=$(cat VERSION)
           git fetch --tags
-          if git tag -l "v$CURRENT_VERSION" | grep -q .; then
-            echo "::error::VERSION $CURRENT_VERSION already has a published tag (v$CURRENT_VERSION). Bump the VERSION file."
+          if git tag -l "v${{ env.VERSION }}" | grep -q .; then
+            echo "::error::VERSION ${{ env.VERSION }} already has a published tag (v${{ env.VERSION }}). Bump the VERSION file."
             exit 1
           fi
-          LATEST_TAG=$(git tag -l 'v*' | sort -V | tail -n1 | sed 's/^v//')
+          LATEST_TAG=$(git tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1 | sed 's/^v//')
+          echo "::notice::Latest existing tag is v$LATEST_TAG"
           if [ -n "$LATEST_TAG" ]; then
-            HIGHER=$(printf '%s\n' "$LATEST_TAG" "$CURRENT_VERSION" | sort -V | tail -n1)
-            if [ "$HIGHER" != "$CURRENT_VERSION" ]; then
-              echo "::error::VERSION $CURRENT_VERSION is lower than existing tag v$LATEST_TAG. Bump the VERSION file."
+            HIGHER=$(printf '%s\n' "$LATEST_TAG" "${{ env.VERSION }}" | sort -V | tail -n1)
+            if [ "$HIGHER" != "${{ env.VERSION }}" ]; then
+              echo "::error::VERSION ${{ env.VERSION }} is lower than existing tag v$LATEST_TAG. Bump the VERSION file."
               exit 1
             fi
           fi
-
-      - name: Read VERSION
-        run: echo "VERSION=$(cat VERSION)" >> "$GITHUB_ENV"
 
       - name: Set up JDK 21
         uses: actions/setup-java@v5
