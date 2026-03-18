@@ -3,7 +3,7 @@ name: Build Library
 on:
   push:
     branches:
-      - '**'
+      - "**"
 
 permissions:
   id-token: write
@@ -36,10 +36,10 @@ jobs:
       - name: Read VERSION
         run: echo "VERSION=$(cat VERSION)" >> "$GITHUB_ENV"
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
         with:
-          java-version: "17"
+          java-version: "21"
           distribution: "temurin"
 
       - name: Set up Gradle

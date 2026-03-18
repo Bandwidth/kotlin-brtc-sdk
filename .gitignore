@@ -28,6 +28,7 @@ local.properties
 *.dex
 gen/
 bin/
+.kotlin
 
 # Java
 *.jar
@@ -35,6 +36,7 @@ bin/
 *.war
 *.ear
 hs_err_pid*
+.java-version
 
 # OS
 .DS_Store
