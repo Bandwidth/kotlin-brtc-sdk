@@ -1,0 +1,53 @@
+# Gradle
+.gradle/
+build/
+build
+gradle-app.setting
+.gradletasknamecache
+
+# IntelliJ IDEA / Android Studio
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# Kotlin
+*.class
+*.kotlin_module
+
+# Android
+local.properties
+*.apk
+*.aab
+*.ap_
+*.dex
+gen/
+bin/
+.kotlin
+
+# Java
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
+*.war
+*.ear
+hs_err_pid*
+.java-version
+
+# OS
+.DS_Store
+Thumbs.db
+ehthumbs.db
+
+# Logs
+*.log
+
+# Dependency caches
+.cache/
+
+# Temporary files
+temp/

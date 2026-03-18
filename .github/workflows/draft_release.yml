@@ -1,0 +1,47 @@
+name: Draft Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: write
+
+jobs:
+  draft-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: version
+        run: echo "VERSION=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update draft release
+        run: |
+          VERSION="v${{ steps.version.outputs.VERSION }}"
+
+          # Check if release already exists
+          RELEASE_EXISTS=$(gh release view "$VERSION" --repo "${{ github.repository }}" --json isDraft -q '.isDraft' 2>/dev/null)
+
+          if [ "$RELEASE_EXISTS" = "true" ]; then
+            # Draft release exists, edit it with new notes
+            gh release edit "$VERSION" \
+              --generate-notes \
+              --repo "${{ github.repository }}"
+          elif [ "$RELEASE_EXISTS" = "false" ]; then
+            # Published release exists, fail
+            echo "::error::Release v$VERSION already exists and is published. Cannot create a new draft. Bump the version in the VERSION file to create a new release."
+            exit 1
+          else
+            # Release doesn't exist, create new draft
+            gh release create "$VERSION" \
+              --draft \
+              --title "$VERSION" \
+              --generate-notes \
+              --repo "${{ github.repository }}"
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
