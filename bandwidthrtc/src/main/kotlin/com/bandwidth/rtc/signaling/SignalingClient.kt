@@ -265,7 +265,7 @@ internal class SignalingClient(
         }
     }
 
-    private fun handleNotification(notification: JsonRpcIncoming, rawText: String) {
+    private fun handleNotification(notification: JsonRpcIncoming, @Suppress("UNUSED_PARAMETER") rawText: String) {
         val method = notification.method ?: return
         log.debug("<<< Server notification: $method")
 
