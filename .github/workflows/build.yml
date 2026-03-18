@@ -17,20 +17,22 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Check VERSION is bumped
+      - name: Check VERSION against existing tags
         if: github.ref != 'refs/heads/main' && github.ref != 'refs/heads/master'
         run: |
-          git fetch origin main --depth=1 2>/dev/null || git fetch origin master --depth=1 2>/dev/null || true
-          MAIN_VERSION=$(git show origin/main:VERSION 2>/dev/null || git show origin/master:VERSION 2>/dev/null || echo "0.0.0")
           CURRENT_VERSION=$(cat VERSION)
-          HIGHER=$(printf '%s\n' "$MAIN_VERSION" "$CURRENT_VERSION" | sort -V | tail -n1)
-          if [ "$CURRENT_VERSION" = "$MAIN_VERSION" ] || [ "$HIGHER" != "$CURRENT_VERSION" ]; then
-            MAJOR=$(echo "$MAIN_VERSION" | cut -d. -f1)
-            MINOR=$(echo "$MAIN_VERSION" | cut -d. -f2)
-            PATCH=$(echo "$MAIN_VERSION" | cut -d. -f3)
-            NEXT="$MAJOR.$MINOR.$((PATCH + 1))"
-            echo "::error::VERSION must be bumped. Current on main: $MAIN_VERSION. Update VERSION to at least $NEXT."
+          git fetch --tags
+          if git tag -l "v$CURRENT_VERSION" | grep -q .; then
+            echo "::error::VERSION $CURRENT_VERSION already has a published tag (v$CURRENT_VERSION). Bump the VERSION file."
             exit 1
+          fi
+          LATEST_TAG=$(git tag -l 'v*' | sort -V | tail -n1 | sed 's/^v//')
+          if [ -n "$LATEST_TAG" ]; then
+            HIGHER=$(printf '%s\n' "$LATEST_TAG" "$CURRENT_VERSION" | sort -V | tail -n1)
+            if [ "$HIGHER" != "$CURRENT_VERSION" ]; then
+              echo "::error::VERSION $CURRENT_VERSION is lower than existing tag v$LATEST_TAG. Bump the VERSION file."
+              exit 1
+            fi
           fi
 
       - name: Read VERSION
