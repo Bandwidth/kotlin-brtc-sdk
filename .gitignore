@@ -3,7 +3,6 @@
 build/
 build
 gradle-app.setting
-!gradle-wrapper.jar
 .gradletasknamecache
 
 # IntelliJ IDEA / Android Studio
@@ -32,6 +31,7 @@ bin/
 
 # Java
 *.jar
+!gradle/wrapper/gradle-wrapper.jar
 *.war
 *.ear
 hs_err_pid*
