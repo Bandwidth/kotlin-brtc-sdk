@@ -3,8 +3,7 @@ name: Draft Release
 on:
   push:
     branches:
-      - main
-      - master
+      - fix*
 
 permissions:
   contents: write
