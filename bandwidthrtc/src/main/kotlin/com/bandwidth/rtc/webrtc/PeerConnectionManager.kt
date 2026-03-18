@@ -460,6 +460,14 @@ class PeerConnectionManager(
     }
 
     override fun cleanup() {
+        // 1. Remove senders from PCs before disposing tracks
+        publishingPC?.let { pc ->
+            for (sender in pc.senders) {
+                try { pc.removeTrack(sender) } catch (_: Exception) {}
+            }
+        }
+
+        // 2. Dispose audio tracks and sources
         for ((streamId, stream) in publishedStreams) {
             for (track in stream.audioTracks) {
                 track.setEnabled(false)
@@ -471,22 +479,30 @@ class PeerConnectionManager(
         publishedAudioSources.clear()
         subscribedStreamMetadata.clear()
 
+        // 3. Close data channels
         listOfNotNull(publishHeartbeatDC, publishDiagnosticsDC, subscribeHeartbeatDC, subscribeDiagnosticsDC)
             .forEach { dc ->
                 log.debug("Closing data channel: ${dc.label()}")
                 dc.close()
+                dc.dispose()
             }
         publishHeartbeatDC = null
         publishDiagnosticsDC = null
         subscribeHeartbeatDC = null
         subscribeDiagnosticsDC = null
 
+        // 4. Close and dispose peer connections
         publishingPC?.close()
+        publishingPC?.dispose()
         subscribingPC?.close()
+        subscribingPC?.dispose()
         publishingPC = null
         subscribingPC = null
 
+        // 5. Dispose factory and reset initialization flag so the next
+        //    PeerConnectionManager can re-initialize the native WebRTC library
         factory.dispose()
+        factoryInitialized = false
 
         subscribeSdpRevision = 0
         publishIceConnected = false
@@ -538,6 +554,10 @@ class PeerConnectionManager(
             for (track in stream.audioTracks) {
                 log.debug("  Audio track: ${track.id()}, enabled=${track.enabled()}, state=${track.state()}")
             }
+
+            // onAddTrack handles subscribe stream notifications — skip here to avoid
+            // firing onStreamAvailable twice for the same stream.
+            if (pcType == PeerConnectionType.SUBSCRIBE) return
 
             val mediaTypes = mutableListOf<MediaType>()
             if (stream.audioTracks.isNotEmpty()) mediaTypes.add(MediaType.AUDIO)

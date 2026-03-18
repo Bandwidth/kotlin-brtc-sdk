@@ -128,6 +128,8 @@ internal class SignalingClient(
             continuation.resumeWithException(BandwidthRTCError.WebSocketDisconnected())
         }
         pendingRequests.clear()
+        eventHandlers.clear()
+        nextRequestId = 1
         log.info("SignalingClient disconnected")
     }
 

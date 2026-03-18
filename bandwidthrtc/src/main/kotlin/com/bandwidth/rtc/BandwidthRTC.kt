@@ -167,12 +167,19 @@ class BandwidthRTC(
 
     private suspend fun cleanupSession() {
         Logger.info("Cleaning up session...")
-        peerConnectionManager?.cleanup()
-        peerConnectionManager = null
-        mixingDevice?.release()
-        mixingDevice = null
+
+        // 1. Disconnect signaling first to stop incoming SDP offers during teardown
         signaling?.disconnect()
         signaling = null
+
+        // 2. Clean up peer connections (closes PCs, disposes tracks, disposes factory)
+        peerConnectionManager?.cleanup()
+        peerConnectionManager = null
+
+        // 3. Release audio device last — PCs may still reference it during cleanup
+        mixingDevice?.release()
+        mixingDevice = null
+
         isConnected = false
     }
 
