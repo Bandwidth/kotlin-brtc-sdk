@@ -4,16 +4,18 @@ on:
   push:
     branches:
       - main
-      - master
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   draft-release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Read version
         id: version
@@ -21,22 +23,33 @@ jobs:
 
       - name: Create or update draft release
         run: |
+          set -x
           VERSION="v${{ steps.version.outputs.VERSION }}"
 
-          # Check if release already exists
-          RELEASE_EXISTS=$(gh release view "$VERSION" --repo "${{ github.repository }}" --json isDraft -q '.isDraft' 2>/dev/null)
+          echo "::notice::VERSION=$VERSION"
+          echo "::notice::REPO=${{ github.repository }}"
+          echo "::notice::SHA=${{ github.sha }}"
+
+          echo "--- gh auth status ---"
+          gh auth status
+
+          echo "--- Checking for existing release ---"
+          RELEASE_EXISTS=$(gh release view "$VERSION" --repo "${{ github.repository }}" --json isDraft -q '.isDraft' 2>&1) || true
+          echo "::notice::RELEASE_EXISTS='$RELEASE_EXISTS'"
+
+          echo "--- Listing existing releases ---"
+          gh release list --repo "${{ github.repository }}" --limit 5 || true
 
           if [ "$RELEASE_EXISTS" = "true" ]; then
-            # Draft release exists, edit it with new notes
+            echo "::notice::Draft release exists, editing..."
             gh release edit "$VERSION" \
               --generate-notes \
               --repo "${{ github.repository }}"
           elif [ "$RELEASE_EXISTS" = "false" ]; then
-            # Published release exists, fail
-            echo "::error::Release v$VERSION already exists and is published. Cannot create a new draft. Bump the version in the VERSION file to create a new release."
+            echo "::error::Release $VERSION already exists and is published. Cannot create a new draft. Bump the version in the VERSION file to create a new release."
             exit 1
           else
-            # Release doesn't exist, create new draft
+            echo "::notice::Release does not exist, creating draft..."
             gh release create "$VERSION" \
               --draft \
               --title "$VERSION" \
