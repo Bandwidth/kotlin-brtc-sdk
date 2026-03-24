@@ -42,8 +42,14 @@ jobs:
 
           if [ "$RELEASE_EXISTS" = "true" ]; then
             echo "::notice::Draft release exists, editing..."
+            NOTES=$(gh api \
+              --method POST \
+              "repos/${{ github.repository }}/releases/generate-notes" \
+              -f tag_name="$VERSION" \
+              -f target_commitish="${{ github.sha }}" \
+              -q '.body')
             gh release edit "$VERSION" \
-              --generate-notes \
+              --notes "$NOTES" \
               --repo "${{ github.repository }}"
           elif [ "$RELEASE_EXISTS" = "false" ]; then
             echo "::error::Release $VERSION already exists and is published. Cannot create a new draft. Bump the version in the VERSION file to create a new release."
