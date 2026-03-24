@@ -21,6 +21,11 @@ jobs:
         id: version
         run: echo "VERSION=$(cat VERSION)" >> "$GITHUB_OUTPUT"
 
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
       - name: Create or update draft release
         run: |
           set -x
