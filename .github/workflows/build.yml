@@ -1,9 +1,8 @@
 name: Build Library
 
 on:
-  push:
-    branches:
-      - "**"
+  pull_request:
+    types: [opened, synchronize]
 
 permissions:
   id-token: write
