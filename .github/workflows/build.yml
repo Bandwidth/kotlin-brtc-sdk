@@ -4,6 +4,10 @@ on:
   pull_request:
     types: [opened, synchronize]
 
+concurrency:
+  group: build
+  cancel-in-progress: true
+
 permissions:
   id-token: write
   contents: write

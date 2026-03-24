@@ -5,6 +5,10 @@ on:
     types:
       - published
 
+concurrency:
+  group: publish-release
+  cancel-in-progress: false
+
 permissions:
   id-token: write
   contents: write
