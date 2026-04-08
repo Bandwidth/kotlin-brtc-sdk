@@ -61,6 +61,10 @@ class BandwidthRTC(
     var isConnected: Boolean = false
         private set
 
+    /** True while an outbound or inbound call is active. Guards against processing stale SDP offers after hangup. */
+    var hasActiveCall: Boolean = false
+        internal set
+
     private val json = Json { ignoreUnknownKeys = true }
     private val scope = CoroutineScope(Dispatchers.IO)
 
@@ -121,11 +125,12 @@ class BandwidthRTC(
             onStreamUnavailable?.invoke(streamId)
         }
         pcMgr.onSubscribingIceConnectionStateChange = { state ->
-            Logger.info("onSubscribingIceConnectionStateChange: $state")
+            Logger.info("Subscribe ICE state changed: $state")
             if (state == PeerConnection.IceConnectionState.DISCONNECTED ||
                 state == PeerConnection.IceConnectionState.FAILED
             ) {
-                Logger.info("Subscribe ICE disconnected/failed — remote side likely hung up")
+                Logger.info("Subscribe ICE disconnected/failed — remote side likely hung up, clearing active call")
+                hasActiveCall = false
                 onRemoteDisconnected?.invoke()
             }
         }
@@ -149,6 +154,7 @@ class BandwidthRTC(
         }
 
         isConnected = true
+        hasActiveCall = true
         Logger.info("Connected to BRTC (endpoint=${mediaResult.endpointId ?: "unknown"})")
 
         val readyMetadata = ReadyMetadata(
@@ -181,6 +187,7 @@ class BandwidthRTC(
         mixingDevice = null
 
         isConnected = false
+        hasActiveCall = false
     }
 
     /** Publish local audio. Adds local tracks, then creates a client-initiated offer sent via offerSdp. */
@@ -279,15 +286,19 @@ class BandwidthRTC(
         Logger.info("BandwidthRTC requestOutboundConnection($id, $type)")
         val sig = signaling
         if (sig == null || !isConnected) throw BandwidthRTCError.NotConnected()
+        hasActiveCall = true
         return sig.requestOutboundConnection(id = id, type = type)
     }
 
     /** Hang up a connection. */
     suspend fun hangupConnection(endpoint: String, type: EndpointType): HangupResult {
-        Logger.info("BandwidthRTC hangupConnection($endpoint, $type)")
+        Logger.info("hangupConnection called (endpoint=$endpoint, type=$type)")
         val sig = signaling
         if (sig == null || !isConnected) throw BandwidthRTCError.NotConnected()
-        return sig.hangupConnection(endpoint = endpoint, type = type)
+        val result = sig.hangupConnection(endpoint = endpoint, type = type)
+        Logger.info("hangupConnection succeeded (result=${result.result}) — clearing active call")
+        hasActiveCall = false
+        return result
     }
 
     /** Set the SDK log level. */
@@ -326,11 +337,17 @@ class BandwidthRTC(
             Logger.info("Signaling event: close")
             Logger.warn("WebSocket closed")
             isConnected = false
+            hasActiveCall = false
         }
     }
 
     private suspend fun handleSubscribeSdpOffer(data: String) {
         Logger.debug("Subscribe SDP offer received (${data.length} chars)")
+
+        if (!hasActiveCall) {
+            Logger.info("Ignoring SDP offer — no active call (post-hangup)")
+            return
+        }
 
         val pcManager = peerConnectionManager
         val sig = signaling
