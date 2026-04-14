@@ -7,6 +7,7 @@ import kotlinx.coroutines.*
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.encodeToJsonElement
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -178,6 +179,11 @@ internal class SignalingClient(
         val params = json.encodeToJsonElement(HangupConnectionParams(endpoint = endpoint, type = type))
         val result = call("hangupConnection", params)
             ?: return HangupResult().also { log.warn("hangupConnection returned null") }
+        // When hanging up a ringing call, the server may return a bare string
+        // (e.g. "bye") instead of an object like {"result": "bye"}.
+        if (result is JsonPrimitive && result.isString) {
+            return HangupResult(result = result.content)
+        }
         return json.decodeFromJsonElement(HangupResult.serializer(), result)
     }
 

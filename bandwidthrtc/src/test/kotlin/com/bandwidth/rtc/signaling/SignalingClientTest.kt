@@ -362,6 +362,62 @@ class SignalingClientTest {
         assertEquals("ok", result.result)
     }
 
+    @Test
+    fun `hangupConnection handles bare string result from server`() = runTest {
+        client.connect(authParams, defaultOptions)
+
+        every { mockWebSocket.send(any()) } answers {
+            val msg = firstArg<String>()
+            if (msg.contains("hangupConnection")) {
+                val request = json.decodeFromString(JsonRpcRequest.serializer(), msg)
+                // Server returns a bare string instead of {"result": "bye"}
+                val response = """{"jsonrpc":"2.0","id":"${request.id}","result":"bye"}"""
+                capturedListener.get()?.onMessage(response)
+            }
+            true
+        }
+
+        val result = client.hangupConnection("ep-1", EndpointType.ENDPOINT)
+        assertEquals("bye", result.result)
+    }
+
+    @Test
+    fun `hangupConnection handles empty string result from server`() = runTest {
+        client.connect(authParams, defaultOptions)
+
+        every { mockWebSocket.send(any()) } answers {
+            val msg = firstArg<String>()
+            if (msg.contains("hangupConnection")) {
+                val request = json.decodeFromString(JsonRpcRequest.serializer(), msg)
+                // Server returns an empty string (ringing hangup)
+                val response = """{"jsonrpc":"2.0","id":"${request.id}","result":""}"""
+                capturedListener.get()?.onMessage(response)
+            }
+            true
+        }
+
+        val result = client.hangupConnection("ep-1", EndpointType.ENDPOINT)
+        assertEquals("", result.result)
+    }
+
+    @Test
+    fun `hangupConnection handles null result from server`() = runTest {
+        client.connect(authParams, defaultOptions)
+
+        every { mockWebSocket.send(any()) } answers {
+            val msg = firstArg<String>()
+            if (msg.contains("hangupConnection")) {
+                val request = json.decodeFromString(JsonRpcRequest.serializer(), msg)
+                val response = """{"jsonrpc":"2.0","id":"${request.id}","result":null}"""
+                capturedListener.get()?.onMessage(response)
+            }
+            true
+        }
+
+        val result = client.hangupConnection("ep-1", EndpointType.ENDPOINT)
+        assertNull(result.result)
+    }
+
     // =========================================================================
     // RPC error handling
     // =========================================================================

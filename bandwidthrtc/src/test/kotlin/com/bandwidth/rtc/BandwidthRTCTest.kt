@@ -426,6 +426,166 @@ class BandwidthRTCTest {
         coVerify { mockSignaling.hangupConnection("ep-1", EndpointType.ENDPOINT) }
     }
 
+    @Test
+    fun `connect sets hasActiveCall to true`() = runTest {
+        connectBrtc()
+        assertTrue(brtc.hasActiveCall)
+    }
+
+    @Test
+    fun `hangupConnection clears hasActiveCall`() = runTest {
+        connectBrtc()
+        coEvery { mockSignaling.hangupConnection(any(), any()) } returns HangupResult(result = "bye")
+
+        assertTrue(brtc.hasActiveCall)
+        brtc.hangupConnection("+15551234567", EndpointType.PHONE_NUMBER)
+        assertFalse(brtc.hasActiveCall)
+    }
+
+    @Test
+    fun `requestOutboundConnection sets hasActiveCall`() = runTest {
+        connectBrtc()
+        // hangup first to clear hasActiveCall
+        coEvery { mockSignaling.hangupConnection(any(), any()) } returns HangupResult(result = "bye")
+        brtc.hangupConnection("ep", EndpointType.ENDPOINT)
+        assertFalse(brtc.hasActiveCall)
+
+        coEvery { mockSignaling.requestOutboundConnection(any(), any()) } returns OutboundConnectionResult(accepted = true)
+        brtc.requestOutboundConnection("+15551234567", EndpointType.PHONE_NUMBER)
+        assertTrue(brtc.hasActiveCall)
+    }
+
+    @Test
+    fun `sdpOffer ignored after hangup`() = runTest {
+        val eventHandlers = captureEventHandlers()
+        coEvery { mockSignaling.hangupConnection(any(), any()) } returns HangupResult(result = "bye")
+
+        brtc.hangupConnection("+15551234567", EndpointType.PHONE_NUMBER)
+
+        // Simulate late SDP offer (e.g. voicemail answering)
+        eventHandlers["sdpOffer"]?.invoke("""{"sdpOffer":"v=0...","peerType":"subscribe","sdpRevision":1}""")
+
+        // Give coroutine a tick
+        kotlinx.coroutines.delay(50)
+
+        coVerify(exactly = 0) { mockPCManager.handleSubscribeSdpOffer(any(), any(), any()) }
+    }
+
+    @Test
+    fun `disconnect clears hasActiveCall`() = runTest {
+        connectBrtc()
+        assertTrue(brtc.hasActiveCall)
+        brtc.disconnect()
+        assertFalse(brtc.hasActiveCall)
+    }
+
+    @Test
+    fun `hasActiveCall is false before connect`() {
+        assertFalse(brtc.hasActiveCall)
+    }
+
+    @Test
+    fun `hangupConnection failure does not clear hasActiveCall`() = runTest {
+        connectBrtc()
+        coEvery { mockSignaling.hangupConnection(any(), any()) } throws
+            BandwidthRTCError.RpcError(500, "server error")
+
+        assertTrue(brtc.hasActiveCall)
+        try {
+            brtc.hangupConnection("ep-1", EndpointType.ENDPOINT)
+        } catch (_: Exception) {}
+        assertTrue(brtc.hasActiveCall)
+    }
+
+    @Test
+    fun `ICE DISCONNECTED clears hasActiveCall`() = runTest {
+        val iceHandler = captureIceHandler()
+        assertTrue(brtc.hasActiveCall)
+
+        iceHandler?.invoke(PeerConnection.IceConnectionState.DISCONNECTED)
+
+        assertFalse(brtc.hasActiveCall)
+    }
+
+    @Test
+    fun `ICE FAILED clears hasActiveCall`() = runTest {
+        val iceHandler = captureIceHandler()
+        assertTrue(brtc.hasActiveCall)
+
+        iceHandler?.invoke(PeerConnection.IceConnectionState.FAILED)
+
+        assertFalse(brtc.hasActiveCall)
+    }
+
+    @Test
+    fun `ICE CONNECTED does not clear hasActiveCall`() = runTest {
+        val iceHandler = captureIceHandler()
+        assertTrue(brtc.hasActiveCall)
+
+        iceHandler?.invoke(PeerConnection.IceConnectionState.CONNECTED)
+
+        assertTrue(brtc.hasActiveCall)
+    }
+
+    @Test
+    fun `close event clears hasActiveCall`() = runTest {
+        val eventHandlers = captureEventHandlers()
+        assertTrue(brtc.hasActiveCall)
+
+        eventHandlers["close"]?.invoke("")
+
+        assertFalse(brtc.hasActiveCall)
+    }
+
+    @Test
+    fun `sdpOffer processed during active call`() = runTest {
+        val eventHandlers = captureEventHandlers()
+        assertTrue(brtc.hasActiveCall)
+
+        coEvery { mockPCManager.handleSubscribeSdpOffer(any(), any(), any()) } returns "answer-sdp"
+
+        eventHandlers["sdpOffer"]?.invoke("""{"sdpOffer":"v=0...","peerType":"subscribe","sdpRevision":1}""")
+        // Handler runs on Dispatchers.IO — give real time for the coroutine to execute
+        Thread.sleep(200)
+
+        coVerify(atLeast = 1) { mockPCManager.handleSubscribeSdpOffer(any(), any(), any()) }
+    }
+
+    @Test
+    fun `requestOutboundConnection after hangup re-enables hasActiveCall`() = runTest {
+        connectBrtc()
+        coEvery { mockSignaling.hangupConnection(any(), any()) } returns HangupResult(result = "bye")
+        coEvery { mockSignaling.requestOutboundConnection(any(), any()) } returns OutboundConnectionResult(accepted = true)
+
+        brtc.hangupConnection("ep", EndpointType.ENDPOINT)
+        assertFalse(brtc.hasActiveCall)
+
+        brtc.requestOutboundConnection("+15551234567", EndpointType.PHONE_NUMBER)
+        assertTrue(brtc.hasActiveCall)
+    }
+
+    @Test
+    fun `hangupConnection returns result from signaling`() = runTest {
+        connectBrtc()
+        coEvery { mockSignaling.hangupConnection("ep-1", EndpointType.PHONE_NUMBER) } returns
+            HangupResult(result = "bye")
+
+        val result = brtc.hangupConnection("ep-1", EndpointType.PHONE_NUMBER)
+
+        assertEquals("bye", result.result)
+    }
+
+    @Test
+    fun `hangupConnection with null result from signaling`() = runTest {
+        connectBrtc()
+        coEvery { mockSignaling.hangupConnection(any(), any()) } returns HangupResult(result = null)
+
+        val result = brtc.hangupConnection("ep-1", EndpointType.ENDPOINT)
+
+        assertNull(result.result)
+        assertFalse(brtc.hasActiveCall)
+    }
+
     // -------------------------------------------------------------------------
     // Event handlers
     // -------------------------------------------------------------------------
