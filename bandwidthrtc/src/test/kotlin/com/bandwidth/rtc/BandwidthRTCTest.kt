@@ -629,6 +629,71 @@ class BandwidthRTCTest {
     }
 
     @Test
+    fun `ready event fires onReady with all connect status fields`() = runTest {
+        val eventHandlers = captureEventHandlers()
+
+        var received: ReadyMetadata? = null
+        brtc.onReady = { received = it }
+
+        eventHandlers["ready"]?.invoke("""
+            {
+                "endpointId": "ep-1",
+                "deviceId": "dev-1",
+                "territory": "US",
+                "region": "us-east-1",
+                "connectStatus": "COMPLETED",
+                "accountId": "9900000",
+                "sessionId": "session-1",
+                "from": "ep-1",
+                "fromType": "ENDPOINT",
+                "fromTags": "tag1",
+                "to": "ep-2",
+                "toType": "ENDPOINT",
+                "toTags": "tag2"
+            }
+        """.trimIndent())
+
+        assertNotNull(received)
+        assertEquals("ep-1", received?.endpointId)
+        assertEquals(ConnectStatus.COMPLETED, received?.connectStatus)
+        assertEquals("9900000", received?.accountId)
+        assertEquals("session-1", received?.sessionId)
+        assertEquals("ep-1", received?.from)
+        assertEquals("ENDPOINT", received?.fromType)
+        assertEquals("tag1", received?.fromTags)
+        assertEquals("ep-2", received?.to)
+        assertEquals("ENDPOINT", received?.toType)
+        assertEquals("tag2", received?.toTags)
+    }
+
+    @Test
+    fun `ready event without connect status fields still works`() = runTest {
+        val eventHandlers = captureEventHandlers()
+
+        var received: ReadyMetadata? = null
+        brtc.onReady = { received = it }
+
+        eventHandlers["ready"]?.invoke("""{"endpointId": "ep-2", "deviceId": "dev-2"}""")
+
+        assertNotNull(received)
+        assertEquals("ep-2", received?.endpointId)
+        assertNull(received?.connectStatus)
+        assertNull(received?.accountId)
+    }
+
+    @Test
+    fun `established event handler is not registered`() = runTest {
+        val registeredEvents = mutableSetOf<String>()
+        every { mockSignaling.onEvent(any(), any()) } answers {
+            registeredEvents.add(firstArg())
+        }
+        coEvery { mockSignaling.setMediaPreferences() } returns SetMediaPreferencesResult()
+        brtc.connect(authParams)
+
+        assertFalse("established handler should not be registered", registeredEvents.contains("established"))
+    }
+
+    @Test
     fun `close event sets isConnected to false`() = runTest {
         val eventHandlers = captureEventHandlers()
 
