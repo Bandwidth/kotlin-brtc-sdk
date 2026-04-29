@@ -466,7 +466,7 @@ class BandwidthRTCOrderOfOperationsTest {
     // =========================================================================
 
     @Test
-    fun `connect registers sdpOffer, ready, established, close handlers`() = runTest {
+    fun `connect registers sdpOffer, ready, close handlers`() = runTest {
         val registeredEvents = mutableListOf<String>()
         every { mockSignaling.onEvent(any(), any()) } answers {
             registeredEvents.add(firstArg())
@@ -477,7 +477,7 @@ class BandwidthRTCOrderOfOperationsTest {
 
         assertTrue("sdpOffer should be registered", registeredEvents.contains("sdpOffer"))
         assertTrue("ready should be registered", registeredEvents.contains("ready"))
-        assertTrue("established should be registered", registeredEvents.contains("established"))
+        assertFalse("established should not be registered", registeredEvents.contains("established"))
         assertTrue("close should be registered", registeredEvents.contains("close"))
     }
 

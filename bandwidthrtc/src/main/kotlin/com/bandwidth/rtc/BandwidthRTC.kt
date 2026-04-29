@@ -329,10 +329,6 @@ class BandwidthRTC(
             onReady?.invoke(metadata)
         }
 
-        signaling.onEvent("established") {
-            Logger.info("Signaling event: established")
-        }
-
         signaling.onEvent("close") {
             Logger.info("Signaling event: close")
             Logger.warn("WebSocket closed")
