@@ -253,9 +253,9 @@ class BandwidthRTC(
     }
 
     /** Send DTMF tones. */
-    fun sendDtmf(tone: String) {
-        Logger.info("BandwidthRTC sendDtmf($tone)")
-        peerConnectionManager?.sendDtmf(tone)
+    fun sendDtmf(tone: String, duration: Int = 100, interToneGap: Int = 50) {
+        Logger.info("BandwidthRTC sendDtmf($tone, duration=$duration, interToneGap=$interToneGap)")
+        peerConnectionManager?.sendDtmf(tone, duration, interToneGap)
     }
 
     /** Get a snapshot of current call statistics. */

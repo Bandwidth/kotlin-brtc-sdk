@@ -355,14 +355,14 @@ class PeerConnectionManager(
         }
     }
 
-    override fun sendDtmf(tone: String) {
+    override fun sendDtmf(tone: String, duration: Int, interToneGap: Int) {
         val pc = publishingPC ?: return
 
         for (sender in pc.senders) {
             if (sender.track()?.kind() == "audio") {
                 val dtmfSender = sender.dtmf()
                 if (dtmfSender != null) {
-                    dtmfSender.insertDtmf(tone, 100, 50)
+                    dtmfSender.insertDtmf(tone, duration, interToneGap)
                     log.debug("Sent DTMF: $tone")
                     return
                 }

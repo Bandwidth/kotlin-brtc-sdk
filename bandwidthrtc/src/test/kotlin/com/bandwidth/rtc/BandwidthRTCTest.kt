@@ -316,7 +316,13 @@ class BandwidthRTCTest {
     @Test
     fun `sendDtmf delegates to peerConnectionManager`() {
         brtc.sendDtmf("5")
-        verify { mockPCManager.sendDtmf("5") }
+        verify { mockPCManager.sendDtmf("5", 100, 50) }
+    }
+
+    @Test
+    fun `sendDtmf forwards custom duration and interToneGap`() {
+        brtc.sendDtmf("1", duration = 300, interToneGap = 80)
+        verify { mockPCManager.sendDtmf("1", 300, 80) }
     }
 
     // -------------------------------------------------------------------------
