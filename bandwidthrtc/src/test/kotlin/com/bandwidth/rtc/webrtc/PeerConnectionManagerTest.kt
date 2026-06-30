@@ -567,6 +567,8 @@ class PeerConnectionManagerTest {
         every { mockTrack.kind() } returns "audio"
         every { mockSender.track() } returns mockTrack
         every { mockSender.dtmf() } returns mockDtmf
+        every { mockDtmf.canInsertDtmf() } returns true
+        every { mockDtmf.insertDtmf(any(), any(), any()) } returns true
         every { mockPublishPc.senders } returns listOf(mockSender)
 
         manager.sendDtmf("3")
@@ -584,11 +586,31 @@ class PeerConnectionManagerTest {
         every { mockTrack.kind() } returns "audio"
         every { mockSender.track() } returns mockTrack
         every { mockSender.dtmf() } returns mockDtmf
+        every { mockDtmf.canInsertDtmf() } returns true
+        every { mockDtmf.insertDtmf(any(), any(), any()) } returns true
         every { mockPublishPc.senders } returns listOf(mockSender)
 
         manager.sendDtmf("5", duration = 300, interToneGap = 80)
 
         verify { mockDtmf.insertDtmf("5", 300, 80) }
+    }
+
+    @Test
+    fun `sendDtmf is a no-op when DTMF sender not ready`() {
+        manager.setupPublishingPeerConnection()
+
+        val mockTrack = mockk<MediaStreamTrack>(relaxed = true)
+        val mockDtmf = mockk<DtmfSender>(relaxed = true)
+        val mockSender = mockk<RtpSender>(relaxed = true)
+        every { mockTrack.kind() } returns "audio"
+        every { mockSender.track() } returns mockTrack
+        every { mockSender.dtmf() } returns mockDtmf
+        every { mockDtmf.canInsertDtmf() } returns false
+        every { mockPublishPc.senders } returns listOf(mockSender)
+
+        manager.sendDtmf("5")
+
+        verify(exactly = 0) { mockDtmf.insertDtmf(any(), any(), any()) }
     }
 
     @Test
