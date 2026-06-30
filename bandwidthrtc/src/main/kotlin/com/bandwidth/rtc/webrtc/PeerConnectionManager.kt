@@ -360,12 +360,17 @@ class PeerConnectionManager(
 
         for (sender in pc.senders) {
             if (sender.track()?.kind() == "audio") {
-                val dtmfSender = sender.dtmf()
-                if (dtmfSender != null) {
-                    dtmfSender.insertDtmf(tone, duration, interToneGap)
-                    log.debug("Sent DTMF: $tone")
-                    return
+                val dtmfSender = sender.dtmf() ?: continue
+                if (!dtmfSender.canInsertDtmf()) {
+                    log.warn("DTMF sender not ready — tone dropped: $tone")
+                    continue
                 }
+                if (dtmfSender.insertDtmf(tone, duration, interToneGap)) {
+                    log.debug("Sent DTMF: $tone")
+                } else {
+                    log.warn("insertDtmf failed for tone: $tone")
+                }
+                return
             }
         }
         log.warn("No audio sender found for DTMF")

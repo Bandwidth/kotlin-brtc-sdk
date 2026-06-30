@@ -114,6 +114,8 @@ class PeerConnectionManagerConcurrencyTest {
         every { mockTrack.kind() } returns "audio"
         every { mockSender.track() } returns mockTrack
         every { mockSender.dtmf() } returns mockDtmf
+        every { mockDtmf.canInsertDtmf() } returns true
+        every { mockDtmf.insertDtmf(any(), any(), any()) } returns true
         every { mockPublishPc.senders } returns listOf(mockSender)
 
         val threads = 4
