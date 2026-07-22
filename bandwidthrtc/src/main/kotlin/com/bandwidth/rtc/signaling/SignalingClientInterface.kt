@@ -13,9 +13,11 @@ interface SignalingClientInterface {
     suspend fun disconnect()
     fun onEvent(method: String, handler: (String) -> Unit)
     fun removeEventHandler(method: String)
-    suspend fun setMediaPreferences(): SetMediaPreferencesResult
+    suspend fun setMediaPreferences(autoAccept: Boolean = true): SetMediaPreferencesResult
     suspend fun offerSdp(sdpOffer: String, peerType: String): OfferSdpResult
     suspend fun answerSdp(sdpAnswer: String, peerType: String)
     suspend fun requestOutboundConnection(id: String, type: EndpointType): OutboundConnectionResult
     suspend fun hangupConnection(endpoint: String, type: EndpointType): HangupResult
+    suspend fun acceptStream()
+    suspend fun declineStream()
 }

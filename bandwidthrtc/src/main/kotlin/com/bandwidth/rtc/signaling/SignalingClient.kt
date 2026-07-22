@@ -144,9 +144,9 @@ internal class SignalingClient(
         eventHandlers.remove(method)
     }
 
-    override suspend fun setMediaPreferences(): SetMediaPreferencesResult {
-        log.debug("SignalingClient.setMediaPreferences()")
-        val params = json.encodeToJsonElement(SetMediaPreferencesParams())
+    override suspend fun setMediaPreferences(autoAccept: Boolean): SetMediaPreferencesResult {
+        log.debug("SignalingClient.setMediaPreferences(autoAccept=$autoAccept)")
+        val params = json.encodeToJsonElement(SetMediaPreferencesParams(autoAccept = autoAccept))
         val result = call("setMediaPreferences", params)
             ?: return SetMediaPreferencesResult().also { log.warn("setMediaPreferences returned null result") }
         return json.decodeFromJsonElement(SetMediaPreferencesResult.serializer(), result)
@@ -185,6 +185,18 @@ internal class SignalingClient(
             return HangupResult(result = result.content)
         }
         return json.decodeFromJsonElement(HangupResult.serializer(), result)
+    }
+
+    override suspend fun acceptStream() {
+        log.info("SignalingClient.acceptStream()")
+        val params = json.encodeToJsonElement(StreamControlParams())
+        call("acceptStream", params)
+    }
+
+    override suspend fun declineStream() {
+        log.info("SignalingClient.declineStream()")
+        val params = json.encodeToJsonElement(StreamControlParams())
+        call("declineStream", params)
     }
 
     private suspend fun call(method: String, params: JsonElement): JsonElement? {

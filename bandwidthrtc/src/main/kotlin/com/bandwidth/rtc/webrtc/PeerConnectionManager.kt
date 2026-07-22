@@ -12,6 +12,7 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.coroutines.suspendCoroutine
+import org.webrtc.MediaStreamTrack
 
 class PeerConnectionManager(
     private val context: Context,
@@ -37,11 +38,11 @@ class PeerConnectionManager(
 
     private val publishedStreams = ConcurrentHashMap<String, MediaStream>()
     private val publishedAudioSources = ConcurrentHashMap<String, AudioSource>()
-    private val subscribedStreamMetadata = ConcurrentHashMap<String, StreamMetadata>()
+    private val subscribedTrackMetadata = ConcurrentHashMap<String, TrackMetadata>()
     var subscribeSdpRevision: Int = 0
         private set
 
-    override var onStreamAvailable: ((MediaStream, List<MediaType>) -> Unit)? = null
+    override var onStreamAvailable: ((MediaStream, List<MediaType>, TrackMetadata?) -> Unit)? = null
     override var onStreamUnavailable: ((String) -> Unit)? = null
     override var onSubscribingIceConnectionStateChange: ((PeerConnection.IceConnectionState) -> Unit)? = null
 
@@ -244,7 +245,7 @@ class PeerConnectionManager(
     override suspend fun handleSubscribeSdpOffer(
         sdpOffer: String,
         sdpRevision: Int?,
-        metadata: Map<String, StreamMetadata>?
+        metadata: Map<String, TrackMetadata>?
     ): String {
         val effectiveRevision = sdpRevision ?: (subscribeSdpRevision + 1)
 
@@ -262,7 +263,7 @@ class PeerConnectionManager(
 
         log.debug("[subscribe] Handling offer (revision=$effectiveRevision)")
 
-        metadata?.let { subscribedStreamMetadata.putAll(it) }
+        metadata?.let { subscribedTrackMetadata.putAll(it) }
 
         val offer = SessionDescription(SessionDescription.Type.OFFER, sdpOffer)
 
@@ -482,7 +483,6 @@ class PeerConnectionManager(
         }
         publishedStreams.clear()
         publishedAudioSources.clear()
-        subscribedStreamMetadata.clear()
 
         // 3. Close data channels
         listOfNotNull(publishHeartbeatDC, publishDiagnosticsDC, subscribeHeartbeatDC, subscribeDiagnosticsDC)
@@ -567,7 +567,7 @@ class PeerConnectionManager(
             val mediaTypes = mutableListOf<MediaType>()
             if (stream.audioTracks.isNotEmpty()) mediaTypes.add(MediaType.AUDIO)
 
-            onStreamAvailable?.invoke(stream, mediaTypes)
+            onStreamAvailable?.invoke(stream, mediaTypes, null)
         }
 
         override fun onRemoveStream(stream: MediaStream?) {
@@ -606,7 +606,13 @@ class PeerConnectionManager(
             val stream = streams?.firstOrNull() ?: return
             log.info("Track added on SUBSCRIBE PC: trackId=${track.id()}, streamId=${stream.id}, enabled=${track.enabled()}")
 
-            onStreamAvailable?.invoke(stream, listOf(MediaType.AUDIO))
+            val trackId = track.id()
+            val metadata = subscribedTrackMetadata.remove(trackId)
+            if (metadata != null) {
+                log.debug("Passing metadata for stream ${stream.id} from track $trackId")
+            }
+
+            onStreamAvailable?.invoke(stream, listOf(MediaType.AUDIO), metadata)
         }
     }
 

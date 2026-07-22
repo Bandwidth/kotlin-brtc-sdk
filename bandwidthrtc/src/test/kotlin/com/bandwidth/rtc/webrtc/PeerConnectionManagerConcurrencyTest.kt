@@ -344,7 +344,7 @@ class PeerConnectionManagerConcurrencyTest {
     // =========================================================================
 
     @Test
-    fun `handleSubscribeSdpOffer stores metadata`() = runTest {
+    fun `handleSubscribeSdpOffer stores track metadata`() = runTest {
         manager.setupPublishingPeerConnection()
         manager.setupSubscribingPeerConnection()
 
@@ -352,17 +352,18 @@ class PeerConnectionManagerConcurrencyTest {
         stubSdpAnswerFlow(mockSubscribePc, mockAnswer)
 
         val metadata = mapOf(
-            "stream-1" to StreamMetadata(endpointId = "ep-1", alias = "user-1", mediaTypes = listOf(MediaType.AUDIO))
+            "track-1" to TrackMetadata(from = "user@example.com", fromType = "phone", autoAccepted = false, tags = "VIP")
         )
 
         manager.handleSubscribeSdpOffer("offer", sdpRevision = 1, metadata = metadata)
 
-        // Metadata should be stored (accessed via reflection)
-        val field = PeerConnectionManager::class.java.getDeclaredField("subscribedStreamMetadata")
+        // Metadata should be stored by track id (accessed via reflection)
+        val field = PeerConnectionManager::class.java.getDeclaredField("subscribedTrackMetadata")
         field.isAccessible = true
         @Suppress("UNCHECKED_CAST")
-        val stored = field.get(manager) as ConcurrentHashMap<String, StreamMetadata>
-        assertEquals("ep-1", stored["stream-1"]?.endpointId)
+        val stored = field.get(manager) as ConcurrentHashMap<String, TrackMetadata>
+        assertEquals("user@example.com", stored["track-1"]?.from)
+        assertEquals(false, stored["track-1"]?.autoAccepted)
     }
 
     @Test

@@ -33,5 +33,6 @@ data class RtcOptions(
     val websocketUrl: String? = null,
     val iceServers: List<PeerConnection.IceServer>? = null,
     val iceTransportPolicy: PeerConnection.IceTransportsType? = null,
-    val audioProcessing: AudioProcessingOptions = AudioProcessingOptions()
+    val audioProcessing: AudioProcessingOptions = AudioProcessingOptions(),
+    val autoAccept: Boolean = true
 )

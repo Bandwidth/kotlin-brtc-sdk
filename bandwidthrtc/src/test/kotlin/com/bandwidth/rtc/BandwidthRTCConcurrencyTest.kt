@@ -85,7 +85,7 @@ class BandwidthRTCConcurrencyTest {
         }
 
         // Capture the stream handler
-        val streamSlot = slot<(MediaStream, List<MediaType>) -> Unit>()
+        val streamSlot = slot<(MediaStream, List<MediaType>, TrackMetadata?) -> Unit>()
         verify { mockPCManager.onStreamAvailable = capture(streamSlot) }
         val handler = streamSlot.captured
 
@@ -98,7 +98,7 @@ class BandwidthRTCConcurrencyTest {
             Thread {
                 try {
                     barrier.await()
-                    handler(buildMockMediaStream("stream-$i"), listOf(MediaType.AUDIO))
+                    handler(buildMockMediaStream("stream-$i"), listOf(MediaType.AUDIO), null)
                 } catch (e: Exception) {
                     errors.incrementAndGet()
                 } finally {
