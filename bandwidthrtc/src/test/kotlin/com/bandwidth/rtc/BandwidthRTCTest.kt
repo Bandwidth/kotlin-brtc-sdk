@@ -689,7 +689,7 @@ class BandwidthRTCTest {
         var receivedStream: RtcStream? = null
         brtc.onStreamAvailable = { receivedStream = it }
 
-        streamHandler?.invoke(mockStream, listOf(MediaType.AUDIO))
+        streamHandler?.invoke(mockStream, listOf(MediaType.AUDIO), null)
 
         assertNotNull(receivedStream)
         assertEquals("remote-stream", receivedStream?.streamId)
@@ -745,8 +745,8 @@ class BandwidthRTCTest {
         return iceHandler
     }
 
-    private suspend fun captureStreamAvailableHandler(): ((MediaStream, List<MediaType>) -> Unit)? {
-        var handler: ((MediaStream, List<MediaType>) -> Unit)? = null
+    private suspend fun captureStreamAvailableHandler(): ((MediaStream, List<MediaType>, TrackMetadata?) -> Unit)? {
+        var handler: ((MediaStream, List<MediaType>, TrackMetadata?) -> Unit)? = null
         every { mockPCManager.onStreamAvailable = any() } answers { handler = firstArg() }
         every { mockPCManager.onStreamAvailable } returns null
         coEvery { mockSignaling.setMediaPreferences() } returns SetMediaPreferencesResult()

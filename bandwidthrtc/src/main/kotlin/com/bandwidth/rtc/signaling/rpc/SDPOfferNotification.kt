@@ -1,6 +1,6 @@
 package com.bandwidth.rtc.signaling.rpc
 
-import com.bandwidth.rtc.types.StreamMetadata
+import com.bandwidth.rtc.types.TrackMetadata
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -9,5 +9,5 @@ data class SDPOfferNotification(
     val peerType: String? = null,
     val sdpOffer: String,
     val sdpRevision: Int? = null,
-    val streamSourceMetadata: Map<String, StreamMetadata>? = null
+    val trackMetadata: Map<String, TrackMetadata>? = null
 )

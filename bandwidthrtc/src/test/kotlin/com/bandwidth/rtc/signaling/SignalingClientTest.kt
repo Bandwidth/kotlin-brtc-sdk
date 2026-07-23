@@ -252,8 +252,10 @@ class SignalingClientTest {
         client.connect(authParams, defaultOptions)
 
         // Stub: when send is called, simulate response
+        val sentMessages = mutableListOf<String>()
         every { mockWebSocket.send(any()) } answers {
             val msg = firstArg<String>()
+            sentMessages.add(msg)
             if (msg.contains("setMediaPreferences")) {
                 val request = json.decodeFromString(JsonRpcRequest.serializer(), msg)
                 val response = """{"jsonrpc":"2.0","id":"${request.id}","result":{"endpointId":"ep-1","deviceId":"dev-1"}}"""
@@ -262,10 +264,32 @@ class SignalingClientTest {
             true
         }
 
-        val result = client.setMediaPreferences()
+        val result = client.setMediaPreferences(autoAccept = true)
 
         assertEquals("ep-1", result.endpointId)
         assertEquals("dev-1", result.deviceId)
+        assertTrue("Should send autoAccept param", sentMessages.any { it.contains("\"autoAccept\":true") })
+    }
+
+    @Test
+    fun `setMediaPreferences sends autoAccept false when specified`() = runTest {
+        client.connect(authParams, defaultOptions)
+
+        val sentMessages = mutableListOf<String>()
+        every { mockWebSocket.send(any()) } answers {
+            val msg = firstArg<String>()
+            sentMessages.add(msg)
+            if (msg.contains("setMediaPreferences")) {
+                val request = json.decodeFromString(JsonRpcRequest.serializer(), msg)
+                val response = """{"jsonrpc":"2.0","id":"${request.id}","result":{"endpointId":"ep-1"}}"""
+                capturedListener.get()?.onMessage(response)
+            }
+            true
+        }
+
+        client.setMediaPreferences(autoAccept = false)
+
+        assertTrue("Should send autoAccept param as false", sentMessages.any { it.contains("\"autoAccept\":false") })
     }
 
     @Test
@@ -416,6 +440,48 @@ class SignalingClientTest {
 
         val result = client.hangupConnection("ep-1", EndpointType.ENDPOINT)
         assertNull(result.result)
+    }
+
+    @Test
+    fun `acceptStream sends RPC and completes`() = runTest {
+        client.connect(authParams, defaultOptions)
+
+        val sentMessages = mutableListOf<String>()
+        every { mockWebSocket.send(any()) } answers {
+            val msg = firstArg<String>()
+            sentMessages.add(msg)
+            if (msg.contains("acceptStream")) {
+                val request = json.decodeFromString(JsonRpcRequest.serializer(), msg)
+                val response = """{"jsonrpc":"2.0","id":"${request.id}","result":{}}"""
+                capturedListener.get()?.onMessage(response)
+            }
+            true
+        }
+
+        // Should not throw
+        client.acceptStream()
+        assertTrue("Should send acceptStream RPC", sentMessages.any { it.contains("acceptStream") })
+    }
+
+    @Test
+    fun `declineStream sends RPC and completes`() = runTest {
+        client.connect(authParams, defaultOptions)
+
+        val sentMessages = mutableListOf<String>()
+        every { mockWebSocket.send(any()) } answers {
+            val msg = firstArg<String>()
+            sentMessages.add(msg)
+            if (msg.contains("declineStream")) {
+                val request = json.decodeFromString(JsonRpcRequest.serializer(), msg)
+                val response = """{"jsonrpc":"2.0","id":"${request.id}","result":{}}"""
+                capturedListener.get()?.onMessage(response)
+            }
+            true
+        }
+
+        // Should not throw
+        client.declineStream()
+        assertTrue("Should send declineStream RPC", sentMessages.any { it.contains("declineStream") })
     }
 
     // =========================================================================

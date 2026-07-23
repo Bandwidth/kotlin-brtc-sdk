@@ -115,8 +115,15 @@ class BandwidthRTC(
             pcMgr = newPCMgr
         }
 
-        pcMgr.onStreamAvailable = { stream, mediaTypes ->
-            val rtcStream = RtcStream(mediaStream = stream, mediaTypes = mediaTypes)
+        pcMgr.onStreamAvailable = { stream, mediaTypes, metadata ->
+            val rtcStream = RtcStream(
+                mediaStream = stream,
+                mediaTypes = mediaTypes,
+                from = metadata?.from,
+                fromType = metadata?.fromType,
+                autoAccepted = metadata?.autoAccepted,
+                tags = metadata?.tags
+            )
             Logger.info("onStreamAvailable: ${rtcStream.streamId}")
             onStreamAvailable?.invoke(rtcStream)
         }
@@ -136,7 +143,8 @@ class BandwidthRTC(
         }
 
         Logger.info("Sending setMediaPreferences...")
-        val mediaResult = sig.setMediaPreferences()
+        val autoAccept = options?.autoAccept ?: true
+        val mediaResult = sig.setMediaPreferences(autoAccept = autoAccept)
         Logger.debug("setMediaPreferences result: endpoint=${mediaResult.endpointId}, hasPublishOffer=${mediaResult.publishSdpOffer != null}, hasSubscribeOffer=${mediaResult.subscribeSdpOffer != null}")
 
         mediaResult.publishSdpOffer?.sdpOffer?.let { publishOffer ->
@@ -301,6 +309,22 @@ class BandwidthRTC(
         return result
     }
 
+    /** Accept an inbound call that was parked (not auto-accepted). */
+    suspend fun acceptStream() {
+        Logger.info("BandwidthRTC acceptStream() called")
+        val sig = signaling
+        if (sig == null || !isConnected) throw BandwidthRTCError.NotConnected()
+        sig.acceptStream()
+    }
+
+    /** Decline an inbound call that was parked (not auto-accepted). */
+    suspend fun declineStream() {
+        Logger.info("BandwidthRTC declineStream() called")
+        val sig = signaling
+        if (sig == null || !isConnected) throw BandwidthRTCError.NotConnected()
+        sig.declineStream()
+    }
+
     /** Set the SDK log level. */
     fun setLogLevel(level: LogLevel) {
         Logger.level = level
@@ -370,7 +394,7 @@ class BandwidthRTC(
             val answerSdp = pcManager.handleSubscribeSdpOffer(
                 sdpOffer = notification.sdpOffer,
                 sdpRevision = notification.sdpRevision,
-                metadata = notification.streamSourceMetadata
+                metadata = notification.trackMetadata
             )
 
             sig.answerSdp(sdpAnswer = answerSdp, peerType = "subscribe")

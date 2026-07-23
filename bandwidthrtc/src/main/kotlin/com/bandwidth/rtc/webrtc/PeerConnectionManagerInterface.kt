@@ -3,12 +3,12 @@ package com.bandwidth.rtc.webrtc
 import com.bandwidth.rtc.types.CallStatsSnapshot
 import com.bandwidth.rtc.types.MediaType
 import com.bandwidth.rtc.types.PeerConnectionType
-import com.bandwidth.rtc.types.StreamMetadata
+import com.bandwidth.rtc.types.TrackMetadata
 import org.webrtc.MediaStream
 import org.webrtc.PeerConnection
 
 interface PeerConnectionManagerInterface {
-    var onStreamAvailable: ((MediaStream, List<MediaType>) -> Unit)?
+    var onStreamAvailable: ((MediaStream, List<MediaType>, TrackMetadata?) -> Unit)?
     var onStreamUnavailable: ((String) -> Unit)?
     var onSubscribingIceConnectionStateChange: ((PeerConnection.IceConnectionState) -> Unit)?
 
@@ -24,7 +24,7 @@ interface PeerConnectionManagerInterface {
     suspend fun handleSubscribeSdpOffer(
         sdpOffer: String,
         sdpRevision: Int?,
-        metadata: Map<String, StreamMetadata>?
+        metadata: Map<String, TrackMetadata>?
     ): String
 
     fun setAudioEnabled(enabled: Boolean)

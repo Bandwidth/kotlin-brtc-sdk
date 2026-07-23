@@ -5,7 +5,8 @@ import kotlinx.serialization.Serializable
 
 @Serializable
 data class SetMediaPreferencesParams(
-    @SerialName("protocol") val protocol_: String = "WEBRTC"
+    @SerialName("protocol") val protocol_: String = "WEBRTC",
+    val autoAccept: Boolean = true
 )
 
 @Serializable
