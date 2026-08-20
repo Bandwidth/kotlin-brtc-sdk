@@ -90,6 +90,19 @@ class BandwidthRTC(
 
         this.options = options
 
+        try {
+            connectInternal(authParams, options)
+        } catch (e: Exception) {
+            // A partial failure here would otherwise leave `signaling` (and its open
+            // WebSocket/ping loop) behind: isConnected stays false, so every retry
+            // reuses that dead client, which immediately throws AlreadyConnected.
+            Logger.error("connect() failed, tearing down partial session: ${e.message}")
+            cleanupSession()
+            throw e
+        }
+    }
+
+    private suspend fun connectInternal(authParams: RtcAuthParams, options: RtcOptions?) {
         val sig: SignalingClientInterface = signaling ?: SignalingClient().also { signaling = it }
 
         registerEventHandlers(sig)
