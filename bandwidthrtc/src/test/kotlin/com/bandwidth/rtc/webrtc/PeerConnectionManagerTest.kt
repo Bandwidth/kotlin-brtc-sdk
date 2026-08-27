@@ -626,6 +626,57 @@ class PeerConnectionManagerTest {
         manager.sendDtmf("9") // should not throw
     }
 
+    @Test
+    fun `sendDtmf fires onDtmfSent once per valid character with the published stream id`() {
+        manager.setupPublishingPeerConnection()
+
+        val mockTrack = mockk<AudioTrack>(relaxed = true)
+        every { mockTrack.kind() } returns "audio"
+        every { mockTrack.id() } returns "track-1"
+
+        val mockDtmf = mockk<DtmfSender>(relaxed = true)
+        val mockSender = mockk<RtpSender>(relaxed = true)
+        every { mockSender.track() } returns mockTrack
+        every { mockSender.dtmf() } returns mockDtmf
+        every { mockDtmf.canInsertDtmf() } returns true
+        every { mockDtmf.insertDtmf(any(), any(), any()) } returns true
+        every { mockPublishPc.senders } returns listOf(mockSender)
+
+        val realStream = MediaStream(0L)
+        realStream.audioTracks.add(mockTrack)
+        injectPublishedStream("stream-1", realStream)
+
+        val events = mutableListOf<DtmfSentEvent>()
+        manager.onDtmfSent = { events.add(it) }
+
+        manager.sendDtmf("1#x2") // 'x' is not a valid DTMF character and should be skipped
+
+        assertEquals(listOf("1", "#", "2"), events.map { it.tone })
+        assertTrue(events.all { it.streamId == "stream-1" })
+    }
+
+    @Test
+    fun `sendDtmf does not fire onDtmfSent when the track has no published stream`() {
+        manager.setupPublishingPeerConnection()
+
+        val mockTrack = mockk<MediaStreamTrack>(relaxed = true)
+        val mockDtmf = mockk<DtmfSender>(relaxed = true)
+        val mockSender = mockk<RtpSender>(relaxed = true)
+        every { mockTrack.kind() } returns "audio"
+        every { mockSender.track() } returns mockTrack
+        every { mockSender.dtmf() } returns mockDtmf
+        every { mockDtmf.canInsertDtmf() } returns true
+        every { mockDtmf.insertDtmf(any(), any(), any()) } returns true
+        every { mockPublishPc.senders } returns listOf(mockSender)
+
+        var fired = false
+        manager.onDtmfSent = { fired = true }
+
+        manager.sendDtmf("3")
+
+        assertFalse(fired)
+    }
+
     // -------------------------------------------------------------------------
     // cleanup()
     // -------------------------------------------------------------------------

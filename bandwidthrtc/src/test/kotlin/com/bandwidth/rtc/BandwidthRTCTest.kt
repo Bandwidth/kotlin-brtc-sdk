@@ -708,6 +708,19 @@ class BandwidthRTCTest {
         assertEquals("stream-gone", removedId)
     }
 
+    @Test
+    fun `dtmf sent callback forwards PeerConnectionManager event`() = runTest {
+        val dtmfHandler = captureDtmfSentHandler()
+
+        var receivedEvent: DtmfSentEvent? = null
+        brtc.onDtmfSent = { receivedEvent = it }
+
+        dtmfHandler?.invoke(DtmfSentEvent(tone = "1", streamId = "stream-1"))
+
+        assertEquals("1", receivedEvent?.tone)
+        assertEquals("stream-1", receivedEvent?.streamId)
+    }
+
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
@@ -758,6 +771,15 @@ class BandwidthRTCTest {
         var handler: ((String) -> Unit)? = null
         every { mockPCManager.onStreamUnavailable = any() } answers { handler = firstArg() }
         every { mockPCManager.onStreamUnavailable } returns null
+        coEvery { mockSignaling.setMediaPreferences() } returns SetMediaPreferencesResult()
+        brtc.connect(authParams)
+        return handler
+    }
+
+    private suspend fun captureDtmfSentHandler(): ((DtmfSentEvent) -> Unit)? {
+        var handler: ((DtmfSentEvent) -> Unit)? = null
+        every { mockPCManager.onDtmfSent = any() } answers { handler = firstArg() }
+        every { mockPCManager.onDtmfSent } returns null
         coEvery { mockSignaling.setMediaPreferences() } returns SetMediaPreferencesResult()
         brtc.connect(authParams)
         return handler

@@ -50,6 +50,9 @@ class BandwidthRTC(
     /** Called with Float32 audio samples for visualization after each remote audio playout chunk. */
     var onRemoteAudioLevel: ((FloatArray) -> Unit)? = null
 
+    /** Called once per DTMF tone queued for local playback on a published stream (see `sendDtmf`). */
+    var onDtmfSent: ((DtmfSentEvent) -> Unit)? = null
+
     internal var signaling: SignalingClientInterface? = null
     internal var peerConnectionManager: PeerConnectionManagerInterface? = null
     private var options: RtcOptions? = null
@@ -144,6 +147,7 @@ class BandwidthRTC(
             Logger.info("onStreamUnavailable: $streamId")
             onStreamUnavailable?.invoke(streamId)
         }
+        pcMgr.onDtmfSent = { event -> onDtmfSent?.invoke(event) }
         pcMgr.onSubscribingIceConnectionStateChange = { state ->
             Logger.info("Subscribe ICE state changed: $state")
             if (state == PeerConnection.IceConnectionState.DISCONNECTED ||
