@@ -38,6 +38,7 @@ class PeerConnectionManager(
 
     private val publishedStreams = ConcurrentHashMap<String, MediaStream>()
     private val publishedAudioSources = ConcurrentHashMap<String, AudioSource>()
+    private val publishedAudioTracks = ConcurrentHashMap<String, AudioTrack>()
     private val subscribedTrackMetadata = ConcurrentHashMap<String, TrackMetadata>()
     var subscribeSdpRevision: Int = 0
         private set
@@ -175,6 +176,7 @@ class PeerConnectionManager(
             val audioSource = factory.createAudioSource(audioConstraints)
             publishedAudioSources[streamId] = audioSource
             val audioTrack = factory.createAudioTrack("audio-$streamId", audioSource)
+            publishedAudioTracks[streamId] = audioTrack
             stream.addTrack(audioTrack)
             pc.addTrack(audioTrack, listOf(streamId))
             log.debug("Added audio track to publishing PC")
@@ -184,6 +186,33 @@ class PeerConnectionManager(
 
         publishedStreams[streamId] = stream
         return stream
+    }
+
+    /**
+     * Re-attach a previously published stream to the current publishing peer connection.
+     *
+     * A track that ended while the session was down produces a sender that never sends RTP, which
+     * leaves the endpoint ineligible on the platform even though the SDP looks correct, so anything
+     * that is not still live is re-acquired from scratch instead of being re-attached dead.
+     *
+     * The caller is responsible for renegotiating once all streams have been re-attached.
+     */
+    override fun republishLocalStream(streamId: String, audio: Boolean): MediaStream {
+        val pc = publishingPC ?: throw BandwidthRTCError.PublishFailed("Publishing peer connection not set up")
+
+        val stream = publishedStreams[streamId]
+        val track = publishedAudioTracks[streamId]
+        val live = stream != null && (!audio || track?.state() == MediaStreamTrack.State.LIVE)
+
+        if (!live) {
+            log.info("Re-acquiring local tracks for stream $streamId (previous tracks are gone)")
+            removeLocalTracks(streamId)
+            return addLocalTracks(audio = audio)
+        }
+
+        track?.let { pc.addTrack(it, listOf(streamId)) }
+        log.debug("Re-attached live local tracks for stream $streamId")
+        return stream!!
     }
 
     override suspend fun createPublishOffer(): String {
@@ -344,6 +373,7 @@ class PeerConnectionManager(
         }
 
         publishedAudioSources.remove(streamId)?.dispose()
+        publishedAudioTracks.remove(streamId)
         publishedStreams.remove(streamId)
         log.debug("Removed local tracks for stream $streamId")
     }
@@ -483,6 +513,7 @@ class PeerConnectionManager(
         }
         publishedStreams.clear()
         publishedAudioSources.clear()
+        publishedAudioTracks.clear()
 
         // 3. Close data channels
         listOfNotNull(publishHeartbeatDC, publishDiagnosticsDC, subscribeHeartbeatDC, subscribeDiagnosticsDC)

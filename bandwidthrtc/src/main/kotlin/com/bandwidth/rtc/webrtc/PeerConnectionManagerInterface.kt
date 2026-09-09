@@ -18,6 +18,7 @@ interface PeerConnectionManagerInterface {
     suspend fun waitForPublishIceConnected()
     suspend fun answerInitialOffer(sdpOffer: String, pcType: PeerConnectionType): String
     fun addLocalTracks(audio: Boolean): MediaStream
+    fun republishLocalStream(streamId: String, audio: Boolean): MediaStream
     fun removeLocalTracks(streamId: String)
     suspend fun createPublishOffer(): String
     suspend fun applyPublishAnswer(remoteAnswer: String)

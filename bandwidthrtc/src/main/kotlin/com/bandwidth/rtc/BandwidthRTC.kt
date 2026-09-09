@@ -12,9 +12,18 @@ import com.bandwidth.rtc.webrtc.PeerConnectionManager
 import com.bandwidth.rtc.webrtc.PeerConnectionManagerInterface
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import org.webrtc.PeerConnection
+import java.util.concurrent.CopyOnWriteArrayList
+import kotlin.random.Random
+
+private const val RECONNECT_INITIAL_DELAY_MS = 1_000L
+private const val RECONNECT_MAX_DELAY_MS = 30_000L
+private const val RECONNECT_JITTER_MS = 500L
+private const val RECONNECT_MAX_ATTEMPTS = 8
 
 /**
  * Main entry point for the Bandwidth BRTC SDK.
@@ -50,9 +59,29 @@ class BandwidthRTC(
     /** Called with Float32 audio samples for visualization after each remote audio playout chunk. */
     var onRemoteAudioLevel: ((FloatArray) -> Unit)? = null
 
+    /**
+     * Called when the session fails in a way the SDK cannot recover from on its own - reconnect
+     * attempts exhausted, a handshake rejection that will not resolve on retry, or a failure to
+     * republish local media after reconnecting. The session is not usable until [connect] succeeds
+     * again, so applications should surface this rather than keep showing a connected state.
+     */
+    var onError: ((Throwable) -> Unit)? = null
+
     internal var signaling: SignalingClientInterface? = null
     internal var peerConnectionManager: PeerConnectionManagerInterface? = null
+    private var injectedSignaling: SignalingClientInterface? = null
+    private var injectedPeerConnectionManager: PeerConnectionManagerInterface? = null
     private var options: RtcOptions? = null
+    private var authParams: RtcAuthParams? = null
+
+    /** Streams published through this instance, retained so they can be re-published after a reconnect. */
+    private val publishRecords = CopyOnWriteArrayList<PublishRecord>()
+
+    @Volatile
+    private var userInitiatedDisconnect = false
+    private var reconnectJob: Job? = null
+
+    private class PublishRecord(val audio: Boolean, val alias: String?, @Volatile var stream: RtcStream)
 
     /** Custom audio device — owns mic capture and remote audio playout. */
     var mixingDevice: MixingAudioDevice? = null
@@ -66,7 +95,7 @@ class BandwidthRTC(
         internal set
 
     private val json = Json { ignoreUnknownKeys = true }
-    private val scope = CoroutineScope(Dispatchers.IO)
+    private var scope: CoroutineScope = CoroutineScope(Dispatchers.IO)
 
     init {
         Logger.level = logLevel
@@ -77,10 +106,14 @@ class BandwidthRTC(
         context: Context,
         logLevel: LogLevel = LogLevel.WARN,
         signaling: SignalingClientInterface?,
-        peerConnectionManager: PeerConnectionManagerInterface?
+        peerConnectionManager: PeerConnectionManagerInterface?,
+        scope: CoroutineScope? = null
     ) : this(context, logLevel) {
         this.signaling = signaling
         this.peerConnectionManager = peerConnectionManager
+        this.injectedSignaling = signaling
+        this.injectedPeerConnectionManager = peerConnectionManager
+        scope?.let { this.scope = it }
     }
 
     /** Connect to the BRTC platform using a JWT endpoint token. */
@@ -88,18 +121,31 @@ class BandwidthRTC(
         Logger.info("BandwidthRTC connect() called")
         if (isConnected) throw BandwidthRTCError.AlreadyConnected()
 
+        this.authParams = authParams
         this.options = options
+        userInitiatedDisconnect = false
 
-        val sig: SignalingClientInterface = signaling ?: SignalingClient().also { signaling = it }
+        establishSession()
+    }
+
+    /** Builds a full session (signaling, peer connections, initial SDP) from the stored auth params. */
+    private suspend fun establishSession() {
+        val authParams = this.authParams ?: throw BandwidthRTCError.NotConnected()
+        val options = this.options
+
+        val sig: SignalingClientInterface = signaling
+            ?: injectedSignaling?.also { signaling = it }
+            ?: SignalingClient().also { signaling = it }
 
         registerEventHandlers(sig)
 
         Logger.info("Connecting signaling...")
         sig.connect(authParams = authParams, options = options)
 
+        val existingPCMgr = peerConnectionManager ?: injectedPeerConnectionManager?.also { peerConnectionManager = it }
         val pcMgr: PeerConnectionManagerInterface
-        if (peerConnectionManager != null) {
-            pcMgr = peerConnectionManager!!
+        if (existingPCMgr != null) {
+            pcMgr = existingPCMgr
         } else {
             Logger.info("Initializing mixing device...")
             val mixing = MixingAudioDevice(context, options?.audioProcessing ?: AudioProcessingOptions())
@@ -175,6 +221,10 @@ class BandwidthRTC(
     /** Disconnect from the BRTC platform. */
     suspend fun disconnect() {
         Logger.info("BandwidthRTC disconnect() called")
+        userInitiatedDisconnect = true
+        reconnectJob?.cancel()
+        reconnectJob = null
+        publishRecords.clear()
         cleanupSession()
         Logger.info("Disconnected from BRTC")
     }
@@ -186,16 +236,22 @@ class BandwidthRTC(
         signaling?.disconnect()
         signaling = null
 
-        // 2. Clean up peer connections (closes PCs, disposes tracks, disposes factory)
-        peerConnectionManager?.cleanup()
-        peerConnectionManager = null
-
-        // 3. Release audio device last — PCs may still reference it during cleanup
-        mixingDevice?.release()
-        mixingDevice = null
+        // 2. Clean up peer connections and the audio device they use
+        releaseMedia()
 
         isConnected = false
         hasActiveCall = false
+    }
+
+    /**
+     * Releases the media resources of a session that is over. Peer connections go first because they
+     * may still reference the audio device while closing.
+     */
+    private fun releaseMedia() {
+        peerConnectionManager?.cleanup()
+        peerConnectionManager = null
+        mixingDevice?.release()
+        mixingDevice = null
     }
 
     /** Publish local audio. Adds local tracks, then creates a client-initiated offer sent via offerSdp. */
@@ -226,6 +282,7 @@ class BandwidthRTC(
         if (audio) mediaTypes.add(MediaType.AUDIO)
 
         val stream = RtcStream(mediaStream = mediaStream, mediaTypes = mediaTypes, alias = alias)
+        publishRecords.add(PublishRecord(audio = audio, alias = alias, stream = stream))
         Logger.info("Published stream ${stream.streamId}")
         return stream
     }
@@ -239,6 +296,7 @@ class BandwidthRTC(
             throw BandwidthRTCError.NotConnected()
         }
 
+        publishRecords.removeIf { it.stream.streamId == stream.streamId }
         pcManager.removeLocalTracks(streamId = stream.streamId)
 
         val localOffer = pcManager.createPublishOffer()
@@ -357,12 +415,118 @@ class BandwidthRTC(
             Logger.info("Signaling event: established")
         }
 
+        val deadSignaling = signaling
         signaling.onEvent("close") {
+            // A late close from a client we have already replaced must not tear down the new session.
+            if (this.signaling !== deadSignaling) {
+                Logger.info("Ignoring close from a replaced signaling client")
+                return@onEvent
+            }
+
             Logger.info("Signaling event: close")
             Logger.warn("WebSocket closed")
             isConnected = false
             hasActiveCall = false
+
+            // The peer connections belong to the session that just died. Release them here or they
+            // dangle for the lifetime of the instance and pile up across reconnects.
+            releaseMedia()
+            this.signaling = null
+
+            if (reconnectJob?.isActive != true) reconnectJob = scope.launch {
+                runCatching { deadSignaling.disconnect() }
+                scheduleReconnect()
+            }
         }
+    }
+
+    /**
+     * Reconnects with bounded exponential backoff after a server-initiated close.
+     *
+     * Nothing is attempted after an application-initiated [disconnect], and retrying stops early on
+     * a handshake rejection that would just recur.
+     */
+    private suspend fun scheduleReconnect() {
+        if (userInitiatedDisconnect) {
+            Logger.info("Not reconnecting - disconnect was application initiated")
+            return
+        }
+        if (authParams == null) return
+        if (isConnected) return
+
+        var delayMs = RECONNECT_INITIAL_DELAY_MS
+        var lastError: Throwable? = null
+
+        for (attempt in 1..RECONNECT_MAX_ATTEMPTS) {
+            delay(delayMs + Random.nextLong(RECONNECT_JITTER_MS))
+            if (userInitiatedDisconnect || isConnected) return
+
+            Logger.info("Reconnect attempt $attempt/$RECONNECT_MAX_ATTEMPTS")
+            try {
+                establishSession()
+                republishStreams()
+                Logger.info("Reconnected successfully")
+                return
+            } catch (e: Exception) {
+                lastError = e
+                Logger.error("Reconnect attempt $attempt failed: ${e.message}")
+                discardSession()
+                if (isFatalHandshakeError(e)) {
+                    Logger.error("Aborting reconnect - handshake error will not resolve on retry")
+                    break
+                }
+            }
+            delayMs = minOf(delayMs * 2, RECONNECT_MAX_DELAY_MS)
+        }
+
+        Logger.error("Reconnect gave up - session is dead")
+        onError?.invoke(lastError ?: BandwidthRTCError.WebSocketDisconnected())
+    }
+
+    /** Handshake failures that recur on every attempt, so retrying only delays the error. */
+    private fun isFatalHandshakeError(e: Throwable): Boolean = when (e) {
+        is BandwidthRTCError.InvalidToken -> true
+        is BandwidthRTCError.RpcError -> e.code == 403 || e.code == 409
+        else -> false
+    }
+
+    /** Tears down a half-built session so the next reconnect attempt starts from nothing. */
+    private suspend fun discardSession() {
+        runCatching { signaling?.disconnect() }
+        signaling = null
+        releaseMedia()
+        isConnected = false
+        hasActiveCall = false
+    }
+
+    /**
+     * Re-attaches every retained published stream to the new publishing peer connection, then
+     * renegotiates once for all of them. Without this the platform never sees RTP from us again and
+     * the endpoint stays ineligible for calls. A first connect retains nothing, so this is a no-op.
+     */
+    private suspend fun republishStreams() {
+        if (publishRecords.isEmpty()) return
+
+        val pcManager = peerConnectionManager ?: throw BandwidthRTCError.PublishFailed("No peer connection manager")
+        val signalingClient = signaling ?: throw BandwidthRTCError.NotConnected()
+
+        Logger.info("Republishing ${publishRecords.size} stream(s)")
+        pcManager.waitForPublishIceConnected()
+
+        for (record in publishRecords) {
+            val mediaStream = pcManager.republishLocalStream(streamId = record.stream.streamId, audio = record.audio)
+            record.stream = RtcStream(
+                mediaStream = mediaStream,
+                mediaTypes = record.stream.mediaTypes,
+                alias = record.alias
+            )
+        }
+
+        // A single renegotiation covers every republished stream.
+        val localOffer = pcManager.createPublishOffer()
+        val result = signalingClient.offerSdp(sdpOffer = localOffer, peerType = "publish")
+        pcManager.applyPublishAnswer(remoteAnswer = result.sdpAnswer)
+        Logger.info("Republish complete")
     }
 
     private suspend fun handleSubscribeSdpOffer(data: String) {

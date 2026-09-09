@@ -697,6 +697,77 @@ class PeerConnectionManagerTest {
     // -------------------------------------------------------------------------
 
     /** Use a real SessionDescription — its `description` field is public final and can't be mocked. */
+
+    // -------------------------------------------------------------------------
+    // republishLocalStream()
+    // -------------------------------------------------------------------------
+
+    @Test(expected = BandwidthRTCError.PublishFailed::class)
+    fun `republishLocalStream throws PublishFailed when publishing PC not set up`() {
+        manager.republishLocalStream("stream-1", audio = true)
+    }
+
+    @Test
+    fun `republishLocalStream re-attaches a still live track`() {
+        manager.setupPublishingPeerConnection()
+
+        val liveTrack = mockk<AudioTrack>(relaxed = true)
+        every { liveTrack.state() } returns MediaStreamTrack.State.LIVE
+        val realStream = MediaStream(0L)
+        realStream.audioTracks.add(liveTrack)
+
+        injectPublishedStream("live-stream", realStream)
+        injectPublishedAudioTrack("live-stream", liveTrack)
+
+        val result = manager.republishLocalStream("live-stream", audio = true)
+
+        assertEquals(realStream, result)
+        verify { mockPublishPc.addTrack(liveTrack, listOf("live-stream")) }
+        verify(exactly = 0) { mockFactory.createAudioTrack(any(), any()) }
+    }
+
+    @Test
+    fun `republishLocalStream re-acquires a track that ended while disconnected`() {
+        manager.setupPublishingPeerConnection()
+
+        val endedTrack = mockk<AudioTrack>(relaxed = true)
+        every { endedTrack.state() } returns MediaStreamTrack.State.ENDED
+        every { endedTrack.id() } returns "ended-track"
+        val realStream = MediaStream(0L)
+        realStream.audioTracks.add(endedTrack)
+
+        injectPublishedStream("dead-stream", realStream)
+        injectPublishedAudioTrack("dead-stream", endedTrack)
+        every { mockPublishPc.senders } returns emptyList()
+
+        val freshStream = mockk<MediaStream>(relaxed = true)
+        val freshSource = mockk<AudioSource>(relaxed = true)
+        val freshTrack = mockk<AudioTrack>(relaxed = true)
+        every { mockFactory.createLocalMediaStream(any()) } returns freshStream
+        every { mockFactory.createAudioSource(any()) } returns freshSource
+        every { mockFactory.createAudioTrack(any(), freshSource) } returns freshTrack
+
+        val result = manager.republishLocalStream("dead-stream", audio = true)
+
+        // A re-attached ended track produces a sender that never sends RTP, so it must be replaced.
+        assertEquals(freshStream, result)
+        verify { endedTrack.dispose() }
+        verify { mockPublishPc.addTrack(freshTrack, any()) }
+        verify(exactly = 0) { mockPublishPc.addTrack(endedTrack, any()) }
+    }
+
+    @Test
+    fun `republishLocalStream acquires new tracks when nothing was retained`() {
+        manager.setupPublishingPeerConnection()
+
+        val freshStream = mockk<MediaStream>(relaxed = true)
+        every { mockFactory.createLocalMediaStream(any()) } returns freshStream
+
+        val result = manager.republishLocalStream("unknown-stream", audio = false)
+
+        assertEquals(freshStream, result)
+    }
+
     private fun buildRealSdp(description: String): SessionDescription =
         SessionDescription(SessionDescription.Type.ANSWER, description)
 
@@ -725,6 +796,13 @@ class PeerConnectionManagerTest {
         val field = PeerConnectionManager::class.java.getDeclaredField("publishedAudioSources")
         field.isAccessible = true
         (field.get(manager) as java.util.concurrent.ConcurrentHashMap<String, AudioSource>)[streamId] = source
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun injectPublishedAudioTrack(streamId: String, track: AudioTrack) {
+        val field = PeerConnectionManager::class.java.getDeclaredField("publishedAudioTracks")
+        field.isAccessible = true
+        (field.get(manager) as java.util.concurrent.ConcurrentHashMap<String, AudioTrack>)[streamId] = track
     }
 
     private fun setPublishIceConnected(value: Boolean) {
