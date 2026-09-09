@@ -159,10 +159,20 @@ class PeerConnectionManager(
         return answerSdp
     }
 
-    override fun addLocalTracks(audio: Boolean): MediaStream {
+    override fun addLocalTracks(audio: Boolean): MediaStream =
+        createLocalStream(audio = audio, streamId = UUID.randomUUID().toString())
+
+    /**
+     * Build a local stream under a caller-chosen id.
+     *
+     * Re-acquiring after a reconnect reuses the previous stream id so the RtcStream handle the
+     * application is already holding keeps working: unpublish() matches on stream id, as does any
+     * application state keyed by it. The JavaScript and Swift SDKs keep the same stream object
+     * across a reconnect, so preserving the id here keeps all three consistent.
+     */
+    private fun createLocalStream(audio: Boolean, streamId: String): MediaStream {
         val pc = publishingPC ?: throw BandwidthRTCError.PublishFailed("Publishing peer connection not set up")
 
-        val streamId = UUID.randomUUID().toString()
         val stream = factory.createLocalMediaStream(streamId)
 
         if (audio) {
@@ -207,7 +217,7 @@ class PeerConnectionManager(
         if (!live) {
             log.info("Re-acquiring local tracks for stream $streamId (previous tracks are gone)")
             removeLocalTracks(streamId)
-            return addLocalTracks(audio = audio)
+            return createLocalStream(audio = audio, streamId = streamId)
         }
 
         track?.let { pc.addTrack(it, listOf(streamId)) }
