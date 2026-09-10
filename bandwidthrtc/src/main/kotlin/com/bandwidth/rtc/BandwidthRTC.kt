@@ -59,6 +59,9 @@ class BandwidthRTC(
     /** Called with Float32 audio samples for visualization after each remote audio playout chunk. */
     var onRemoteAudioLevel: ((FloatArray) -> Unit)? = null
 
+    /** Called once per DTMF tone queued for local playback on a published stream (see `sendDtmf`). */
+    var onDtmfSent: ((DtmfSentEvent) -> Unit)? = null
+
     /**
      * Called when the session fails in a way the SDK cannot recover from on its own - reconnect
      * attempts exhausted, a handshake rejection that will not resolve on retry, or a failure to
@@ -125,10 +128,24 @@ class BandwidthRTC(
         this.options = options
         userInitiatedDisconnect = false
 
-        establishSession()
+        try {
+            establishSession()
+        } catch (e: Exception) {
+            // A partial failure here would otherwise leave `signaling` (and its open
+            // WebSocket/ping loop) behind: isConnected stays false, so every retry
+            // reuses that dead client, which immediately throws AlreadyConnected.
+            Logger.error("connect() failed, tearing down partial session: ${e.message}")
+            cleanupSession()
+            throw e
+        }
     }
 
-    /** Builds a full session (signaling, peer connections, initial SDP) from the stored auth params. */
+    /**
+     * Builds a full session (signaling, peer connections, initial SDP) from the stored auth
+     * params. Used by both [connect] and the reconnect loop, which is why failure here does not
+     * itself tear down the session - [connect] does that around its own call, but a reconnect
+     * attempt failing is expected and handled by retrying with backoff instead.
+     */
     private suspend fun establishSession() {
         val authParams = this.authParams ?: throw BandwidthRTCError.NotConnected()
         val options = this.options
@@ -177,6 +194,7 @@ class BandwidthRTC(
             Logger.info("onStreamUnavailable: $streamId")
             onStreamUnavailable?.invoke(streamId)
         }
+        pcMgr.onDtmfSent = { event -> onDtmfSent?.invoke(event) }
         pcMgr.onSubscribingIceConnectionStateChange = { state ->
             Logger.info("Subscribe ICE state changed: $state")
             if (state == PeerConnection.IceConnectionState.DISCONNECTED ||

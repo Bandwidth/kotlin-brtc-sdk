@@ -24,6 +24,7 @@ class PeerConnectionManager(
 
     companion object {
         private var factoryInitialized = false
+        private val VALID_DTMF_TONES = "0123456789ABCDabcd#*".toSet()
     }
 
     private val factory: PeerConnectionFactory
@@ -46,6 +47,7 @@ class PeerConnectionManager(
     override var onStreamAvailable: ((MediaStream, List<MediaType>, TrackMetadata?) -> Unit)? = null
     override var onStreamUnavailable: ((String) -> Unit)? = null
     override var onSubscribingIceConnectionStateChange: ((PeerConnection.IceConnectionState) -> Unit)? = null
+    override var onDtmfSent: ((DtmfSentEvent) -> Unit)? = null
 
     @Volatile
     private var publishIceConnected = false
@@ -400,7 +402,8 @@ class PeerConnectionManager(
         val pc = publishingPC ?: return
 
         for (sender in pc.senders) {
-            if (sender.track()?.kind() == "audio") {
+            val track = sender.track()
+            if (track?.kind() == "audio") {
                 val dtmfSender = sender.dtmf() ?: continue
                 if (!dtmfSender.canInsertDtmf()) {
                     log.warn("DTMF sender not ready — tone dropped: $tone")
@@ -408,6 +411,18 @@ class PeerConnectionManager(
                 }
                 if (dtmfSender.insertDtmf(tone, duration, interToneGap)) {
                     log.debug("Sent DTMF: $tone")
+                    val streamId = publishedStreams.entries.find { (_, stream) ->
+                        stream.audioTracks.any { it.id() == track.id() }
+                    }?.key
+                    // insertDtmf is fire-and-forget with no completion signal from WebRTC, so this
+                    // reports tones as queued rather than as actually played.
+                    if (streamId != null) {
+                        for (character in tone) {
+                            if (VALID_DTMF_TONES.contains(character)) {
+                                onDtmfSent?.invoke(DtmfSentEvent(tone = character.toString(), streamId = streamId))
+                            }
+                        }
+                    }
                 } else {
                     log.warn("insertDtmf failed for tone: $tone")
                 }

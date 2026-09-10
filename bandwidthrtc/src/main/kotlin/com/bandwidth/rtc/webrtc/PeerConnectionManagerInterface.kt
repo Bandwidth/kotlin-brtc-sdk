@@ -1,6 +1,7 @@
 package com.bandwidth.rtc.webrtc
 
 import com.bandwidth.rtc.types.CallStatsSnapshot
+import com.bandwidth.rtc.types.DtmfSentEvent
 import com.bandwidth.rtc.types.MediaType
 import com.bandwidth.rtc.types.PeerConnectionType
 import com.bandwidth.rtc.types.TrackMetadata
@@ -11,6 +12,7 @@ interface PeerConnectionManagerInterface {
     var onStreamAvailable: ((MediaStream, List<MediaType>, TrackMetadata?) -> Unit)?
     var onStreamUnavailable: ((String) -> Unit)?
     var onSubscribingIceConnectionStateChange: ((PeerConnection.IceConnectionState) -> Unit)?
+    var onDtmfSent: ((DtmfSentEvent) -> Unit)?
 
     fun setupPublishingPeerConnection(): PeerConnection
     fun setupSubscribingPeerConnection(): PeerConnection

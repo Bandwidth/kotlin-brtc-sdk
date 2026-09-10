@@ -120,6 +120,7 @@ class BandwidthRTCResourceLifecycleTest {
         }
 
         assertFalse("Should not be connected after failed connect", brtc.isConnected)
+        assertNull("signaling should be torn down, not left orphaned", brtc.signaling)
     }
 
     @Test
@@ -137,6 +138,9 @@ class BandwidthRTCResourceLifecycleTest {
         // isConnected should not be true since connect didn't complete
         assertFalse("Should not be connected after failed setMediaPreferences",
             brtc.isConnected)
+        assertNull("signaling should be torn down, not left orphaned", brtc.signaling)
+        assertNull("peerConnectionManager should be torn down, not left orphaned",
+            brtc.peerConnectionManager)
     }
 
     @Test
@@ -155,6 +159,31 @@ class BandwidthRTCResourceLifecycleTest {
         }
 
         assertFalse(brtc.isConnected)
+        assertNull("signaling should be torn down, not left orphaned", brtc.signaling)
+    }
+
+    @Test
+    fun `connect can be retried after a failed attempt`() = runTest {
+        coEvery { mockSignaling.setMediaPreferences() } throws
+            BandwidthRTCError.RpcError(500, "server error")
+
+        try {
+            brtc.connect(authParams)
+            fail("Should have thrown")
+        } catch (e: BandwidthRTCError.RpcError) {
+            // Expected
+        }
+
+        // A prior failed attempt must not leave a dead signaling client behind —
+        // otherwise every retry would immediately throw AlreadyConnected forever.
+        // (A real app would get a fresh SignalingClient here; the test re-injects
+        // the mock to keep asserting against it.)
+        brtc.signaling = mockSignaling
+        brtc.peerConnectionManager = mockPCManager
+        coEvery { mockSignaling.setMediaPreferences() } returns SetMediaPreferencesResult()
+        brtc.connect(authParams)
+
+        assertTrue("Should be connected after a successful retry", brtc.isConnected)
     }
 
     // =========================================================================
