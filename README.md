@@ -117,6 +117,7 @@ val brtc = BandwidthRTC(context: Context, logLevel: LogLevel = LogLevel.WARN)
 | `onRemoteDisconnected` | `(() -> Unit)?` | Subscribe ICE disconnected or failed |
 | `onLocalAudioLevel` | `((FloatArray) -> Unit)?` | Per-chunk Float32 mic samples (for visualization) |
 | `onRemoteAudioLevel` | `((FloatArray) -> Unit)?` | Per-chunk Float32 remote playout samples (for visualization) |
+| `onError` | `((Throwable) -> Unit)?` | Session failed unrecoverably (reconnect exhausted or republish failed) |
 
 #### Methods
 

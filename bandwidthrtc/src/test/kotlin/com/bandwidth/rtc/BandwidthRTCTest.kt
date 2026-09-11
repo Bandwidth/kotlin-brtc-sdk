@@ -4,10 +4,13 @@ import android.content.Context
 import com.bandwidth.rtc.signaling.SignalingClientInterface
 import com.bandwidth.rtc.signaling.rpc.OfferSdpResult
 import com.bandwidth.rtc.signaling.rpc.SdpOffer
+import com.bandwidth.rtc.media.MixingAudioDevice
 import com.bandwidth.rtc.signaling.rpc.SetMediaPreferencesResult
 import com.bandwidth.rtc.types.*
 import com.bandwidth.rtc.webrtc.PeerConnectionManagerInterface
 import io.mockk.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.*
@@ -33,7 +36,12 @@ class BandwidthRTCTest {
         brtc = BandwidthRTC(
             context = context,
             signaling = mockSignaling,
-            peerConnectionManager = mockPCManager
+            peerConnectionManager = mockPCManager,
+            // onReady/onError are dispatched via scope.launch (see BandwidthRTC.kt) rather than
+            // invoked inline, so they need a scope the test can actually drive. Unconfined runs
+            // launched coroutines eagerly on the calling thread instead of needing an explicit
+            // advanceUntilIdle() after every assertion on those callbacks.
+            scope = CoroutineScope(UnconfinedTestDispatcher())
         )
     }
 
@@ -295,18 +303,23 @@ class BandwidthRTCTest {
     // -------------------------------------------------------------------------
 
     @Test
-    fun `setMicEnabled delegates to peerConnectionManager`() {
+    fun `setMicEnabled mutes at the audio device, not on the track`() {
+        // Muting by disabling the track would make the audio device module stop capture, so the
+        // sender would emit no RTP and the platform would never see the endpoint as callable.
+        val mockDevice = mockk<MixingAudioDevice>(relaxed = true)
+        brtc.mixingDevice = mockDevice
+
         brtc.setMicEnabled(false)
-        verify { mockPCManager.setAudioEnabled(false) }
+        verify { mockDevice.setMicrophoneMute(true) }
 
         brtc.setMicEnabled(true)
-        verify { mockPCManager.setAudioEnabled(true) }
+        verify { mockDevice.setMicrophoneMute(false) }
     }
 
     @Test
-    fun `setMicEnabled is a no-op when peerConnectionManager is null`() {
-        val noPCMgr = BandwidthRTC(context = context, signaling = null, peerConnectionManager = null)
-        noPCMgr.setMicEnabled(true) // should not throw
+    fun `setMicEnabled is a no-op when there is no audio device`() {
+        val noDevice = BandwidthRTC(context = context, signaling = null, peerConnectionManager = null)
+        noDevice.setMicEnabled(true) // should not throw
     }
 
     // -------------------------------------------------------------------------
