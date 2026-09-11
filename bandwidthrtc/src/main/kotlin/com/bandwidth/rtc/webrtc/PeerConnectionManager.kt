@@ -40,7 +40,7 @@ class PeerConnectionManager(
     private val publishedStreams = ConcurrentHashMap<String, MediaStream>()
     private val publishedAudioSources = ConcurrentHashMap<String, AudioSource>()
     private val subscribedTrackMetadata = ConcurrentHashMap<String, TrackMetadata>()
-    var subscribeSdpRevision: Int = 0
+    var subscribeSdpRevision: Long = 0
         private set
 
     override var onStreamAvailable: ((MediaStream, List<MediaType>, TrackMetadata?) -> Unit)? = null
@@ -246,17 +246,17 @@ class PeerConnectionManager(
 
     override suspend fun handleSubscribeSdpOffer(
         sdpOffer: String,
-        sdpRevision: Int?,
+        sdpRevision: Long?,
         metadata: Map<String, TrackMetadata>?
     ): String {
         val effectiveRevision = sdpRevision ?: (subscribeSdpRevision + 1)
 
-        if (effectiveRevision <= subscribeSdpRevision && subscribeSdpRevision != 0) {
+        if (effectiveRevision <= subscribeSdpRevision && subscribeSdpRevision != 0L) {
             log.warn("Rejecting stale SDP offer (revision $effectiveRevision <= $subscribeSdpRevision)")
             throw BandwidthRTCError.SdpNegotiationFailed("Stale SDP offer")
         }
 
-        if (subscribeSdpRevision == 0) {
+        if (subscribeSdpRevision == 0L) {
             log.debug("Accepting first subscribe SDP offer (revision 0→$effectiveRevision)")
         }
 

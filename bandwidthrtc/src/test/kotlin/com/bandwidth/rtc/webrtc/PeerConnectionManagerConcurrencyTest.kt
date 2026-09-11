@@ -216,7 +216,7 @@ class PeerConnectionManagerConcurrencyTest {
         // Reject stale revisions: 1, 2, 3, 4, 5
         for (stale in 1..5) {
             try {
-                manager.handleSubscribeSdpOffer("stale-$stale", sdpRevision = stale, metadata = null)
+                manager.handleSubscribeSdpOffer("stale-$stale", sdpRevision = stale.toLong(), metadata = null)
                 fail("Should reject stale revision $stale")
             } catch (e: BandwidthRTCError.SdpNegotiationFailed) {
                 assertTrue(e.message!!.contains("Stale"))
