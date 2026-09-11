@@ -81,6 +81,12 @@ internal class SignalingClient(
 
                 override fun onClosing(code: Int, reason: String) {
                     log.info("WebSocket closing: code=$code, reason=$reason")
+                    // The remote peer (the gateway, e.g. evicting this endpoint during a deploy
+                    // drain) has sent a close frame and is waiting for us to reciprocate before
+                    // completing the closing handshake. Without this, OkHttp holds the
+                    // connection half-open indefinitely - onClosed() never fires, so
+                    // handleDisconnect() (and the reconnect loop it drives) never runs.
+                    ws.close(code, reason)
                 }
 
                 override fun onClosed(code: Int, reason: String) {
