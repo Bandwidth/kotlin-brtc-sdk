@@ -519,38 +519,6 @@ class PeerConnectionManagerTest {
     }
 
     // -------------------------------------------------------------------------
-    // setAudioEnabled()
-    // -------------------------------------------------------------------------
-
-    @Test
-    fun `setAudioEnabled disables all published audio tracks`() {
-        manager.setupPublishingPeerConnection()
-
-        val mockTrack = mockk<AudioTrack>(relaxed = true)
-        val realStream = MediaStream(0L)
-        realStream.audioTracks.add(mockTrack)
-        injectPublishedStream("s1", realStream)
-
-        manager.setAudioEnabled(false)
-
-        verify { mockTrack.setEnabled(false) }
-    }
-
-    @Test
-    fun `setAudioEnabled enables all published audio tracks`() {
-        manager.setupPublishingPeerConnection()
-
-        val mockTrack = mockk<AudioTrack>(relaxed = true)
-        val realStream = MediaStream(0L)
-        realStream.audioTracks.add(mockTrack)
-        injectPublishedStream("s1", realStream)
-
-        manager.setAudioEnabled(true)
-
-        verify { mockTrack.setEnabled(true) }
-    }
-
-    // -------------------------------------------------------------------------
     // sendDtmf()
     // -------------------------------------------------------------------------
 
@@ -851,7 +819,6 @@ class PeerConnectionManagerTest {
         var snapshot: CallStatsSnapshot? = null
         manager.getCallStats(0, 0, 0.0) { snapshot = it }
         manager.sendDtmf("5")
-        manager.setAudioEnabled(false)
         manager.removeLocalTracks("any-stream")
 
         assertNotNull(snapshot)

@@ -490,16 +490,6 @@ class PeerConnectionManager(
         }
     }
 
-    override fun setAudioEnabled(enabled: Boolean) {
-        useNative {
-            for ((_, stream) in publishedStreams) {
-                for (track in stream.audioTracks) {
-                    track.setEnabled(enabled)
-                }
-            }
-        }
-    }
-
     override fun sendDtmf(tone: String, duration: Int, interToneGap: Int) {
         useNative {
             val pc = publishingPC ?: return@useNative

@@ -30,7 +30,6 @@ interface PeerConnectionManagerInterface {
         metadata: Map<String, TrackMetadata>?
     ): String
 
-    fun setAudioEnabled(enabled: Boolean)
     fun sendDtmf(tone: String, duration: Int = 100, interToneGap: Int = 50)
     fun cleanup()
     fun getCallStats(

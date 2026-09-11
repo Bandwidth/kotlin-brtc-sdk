@@ -106,9 +106,9 @@ class BandwidthRTC(
     // whose native factory) may have already been disposed by an earlier reconnect's cleanup.
     private class PublishRecord(val id: String, val audio: Boolean, val alias: String?, @Volatile var stream: RtcStream)
 
-    /** Custom audio device — owns mic capture and remote audio playout. */
+    /** Custom audio device - owns mic capture and remote audio playout. */
     var mixingDevice: MixingAudioDevice? = null
-        private set
+        internal set
 
     var isConnected: Boolean = false
         private set
@@ -215,9 +215,13 @@ class BandwidthRTC(
             val mixing = MixingAudioDevice(context, options?.audioProcessing ?: AudioProcessingOptions())
             mixing.onLocalAudioLevel = { samples -> safeCallback("onLocalAudioLevel") { onLocalAudioLevel?.invoke(samples) } }
             mixing.onRemoteAudioLevel = { samples -> safeCallback("onRemoteAudioLevel") { onRemoteAudioLevel?.invoke(samples) } }
-            // A fresh MixingAudioDevice always starts on the earpiece - reapply whatever the
-            // caller last chose via setSpeakerphoneOn() rather than silently reverting it.
+            // A fresh MixingAudioDevice starts on the earpiece and unmuted, so reapply whatever
+            // the caller last chose rather than silently reverting both. Mute especially: a
+            // reconnect that came back hot would be a privacy problem, and one that came back
+            // muted the wrong way (by disabling the track) would stop the RTP the platform
+            // needs to see before it considers the endpoint callable again.
             mixing.setSpeakerphoneOn(speakerphoneEnabled)
+            mixing.setMicrophoneMute(!micEnabled)
             this.mixingDevice = mixing
 
             Logger.info("Initializing peer connection manager...")
@@ -394,13 +398,6 @@ class BandwidthRTC(
 
         val mediaStream = pcManager.addLocalTracks(audio = audio)
 
-        // A newly added track always comes back enabled - apply a mute the caller set via
-        // setMicEnabled() before this stream existed (e.g. "start muted") instead of silently
-        // ignoring it until whatever the next reconnect happens to be.
-        if (!micEnabled) {
-            pcManager.setAudioEnabled(false)
-        }
-
         val localOffer = pcManager.createPublishOffer()
         Logger.debug("Created publish offer with local tracks")
 
@@ -441,10 +438,12 @@ class BandwidthRTC(
     /** Enable or disable the microphone for all published streams. */
     fun setMicEnabled(enabled: Boolean) {
         Logger.info("BandwidthRTC setMicEnabled($enabled)")
-        // Retained so a reconnect's fresh, always-enabled tracks can be muted back to match -
-        // republishing otherwise silently un-mutes the caller.
+        // Retained so a reconnect, which builds a brand new audio device, can be put back the
+        // way the caller left it - see establishSession().
         micEnabled = enabled
-        peerConnectionManager?.setAudioEnabled(enabled)
+        // Muting at the audio device rather than on the track is load-bearing, not stylistic:
+        // see MixingAudioDevice.setMicrophoneMute.
+        mixingDevice?.setMicrophoneMute(!enabled)
     }
 
     /** Route audio to the speakerphone or earpiece. */
@@ -683,11 +682,8 @@ class BandwidthRTC(
             )
         }
 
-        // A fresh republished track always comes back enabled - put it back the way the
-        // application last left it via setMicEnabled() rather than silently un-muting.
-        if (!micEnabled) {
-            pcManager.setAudioEnabled(false)
-        }
+        // Mute is not reapplied here: it lives on the audio device, which establishSession()
+        // already restored before this runs.
 
         // A single renegotiation covers every republished stream.
         val localOffer = pcManager.createPublishOffer()

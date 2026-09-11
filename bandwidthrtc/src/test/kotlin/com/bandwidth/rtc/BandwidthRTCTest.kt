@@ -4,6 +4,7 @@ import android.content.Context
 import com.bandwidth.rtc.signaling.SignalingClientInterface
 import com.bandwidth.rtc.signaling.rpc.OfferSdpResult
 import com.bandwidth.rtc.signaling.rpc.SdpOffer
+import com.bandwidth.rtc.media.MixingAudioDevice
 import com.bandwidth.rtc.signaling.rpc.SetMediaPreferencesResult
 import com.bandwidth.rtc.types.*
 import com.bandwidth.rtc.webrtc.PeerConnectionManagerInterface
@@ -267,26 +268,6 @@ class BandwidthRTCTest {
         assertFalse(stream.mediaTypes.contains(MediaType.AUDIO))
     }
 
-    @Test
-    fun `publish applies a mic mute set before this stream existed`() = runTest {
-        connectBrtc()
-        brtc.setMicEnabled(false)
-        clearMocks(mockPCManager, answers = false, recordedCalls = true)
-
-        val mockStream = buildMockMediaStream("s3")
-        coEvery { mockPCManager.waitForPublishIceConnected() } just Runs
-        every { mockPCManager.addLocalTracks(any()) } returns mockStream
-        coEvery { mockPCManager.createPublishOffer() } returns "offer"
-        coEvery { mockSignaling.offerSdp(any(), any()) } returns OfferSdpResult("answer")
-        coEvery { mockPCManager.applyPublishAnswer(any()) } just Runs
-
-        brtc.publish(audio = true)
-
-        // A fresh track from addLocalTracks() always comes back enabled - the mute set before
-        // any stream existed must be reapplied once there is a track for it to apply to.
-        verify { mockPCManager.setAudioEnabled(false) }
-    }
-
     // -------------------------------------------------------------------------
     // unpublish()
     // -------------------------------------------------------------------------
@@ -322,18 +303,23 @@ class BandwidthRTCTest {
     // -------------------------------------------------------------------------
 
     @Test
-    fun `setMicEnabled delegates to peerConnectionManager`() {
+    fun `setMicEnabled mutes at the audio device, not on the track`() {
+        // Muting by disabling the track would make the audio device module stop capture, so the
+        // sender would emit no RTP and the platform would never see the endpoint as callable.
+        val mockDevice = mockk<MixingAudioDevice>(relaxed = true)
+        brtc.mixingDevice = mockDevice
+
         brtc.setMicEnabled(false)
-        verify { mockPCManager.setAudioEnabled(false) }
+        verify { mockDevice.setMicrophoneMute(true) }
 
         brtc.setMicEnabled(true)
-        verify { mockPCManager.setAudioEnabled(true) }
+        verify { mockDevice.setMicrophoneMute(false) }
     }
 
     @Test
-    fun `setMicEnabled is a no-op when peerConnectionManager is null`() {
-        val noPCMgr = BandwidthRTC(context = context, signaling = null, peerConnectionManager = null)
-        noPCMgr.setMicEnabled(true) // should not throw
+    fun `setMicEnabled is a no-op when there is no audio device`() {
+        val noDevice = BandwidthRTC(context = context, signaling = null, peerConnectionManager = null)
+        noDevice.setMicEnabled(true) // should not throw
     }
 
     // -------------------------------------------------------------------------
