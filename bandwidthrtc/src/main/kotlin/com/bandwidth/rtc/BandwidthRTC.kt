@@ -10,9 +10,12 @@ import com.bandwidth.rtc.util.LogLevel
 import com.bandwidth.rtc.util.Logger
 import com.bandwidth.rtc.webrtc.PeerConnectionManager
 import com.bandwidth.rtc.webrtc.PeerConnectionManagerInterface
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
@@ -84,7 +87,24 @@ class BandwidthRTC(
     private var userInitiatedDisconnect = false
     private var reconnectJob: Job? = null
 
-    private class PublishRecord(val audio: Boolean, val alias: String?, @Volatile var stream: RtcStream)
+    @Volatile
+    private var micEnabled = true
+    @Volatile
+    private var speakerphoneEnabled = false
+
+    // Guards releaseMedia()'s read-then-null of peerConnectionManager/mixingDevice: it can be
+    // called from the app's own calling thread (disconnect(), a failed connect()/reconnect
+    // attempt) and, independently, from whatever thread delivers the "close" websocket event -
+    // without this, both could observe the same non-null instance and dispose it twice, which is
+    // a JNI use-after-free rather than a merely-redundant no-op.
+    private val mediaLock = Any()
+
+    // The RtcStream a stream is republished as after a reconnect wraps a brand new MediaStream,
+    // so its .streamId (a live call through to the native object) is only valid on the session
+    // that created it. Capturing the id up front means republishStreams() and unpublish() never
+    // have to make that call against a stream whose owning PeerConnectionManager (and therefore
+    // whose native factory) may have already been disposed by an earlier reconnect's cleanup.
+    private class PublishRecord(val id: String, val audio: Boolean, val alias: String?, @Volatile var stream: RtcStream)
 
     /** Custom audio device — owns mic capture and remote audio playout. */
     var mixingDevice: MixingAudioDevice? = null
@@ -98,7 +118,16 @@ class BandwidthRTC(
         internal set
 
     private val json = Json { ignoreUnknownKeys = true }
-    private var scope: CoroutineScope = CoroutineScope(Dispatchers.IO)
+    // SupervisorJob so one child coroutine throwing (an application callback, a reconnect
+    // attempt) cannot cancel every other coroutine running on this scope - without it, an
+    // app-supplied onError/onReady/onStreamAvailable that throws would silently kill event
+    // handling for the rest of the instance's lifetime. The handler is a last-resort net for
+    // whatever isn't already caught closer to its source.
+    private var scope: CoroutineScope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, e ->
+            Logger.error("Uncaught exception on BandwidthRTC scope: ${e.message}")
+        }
+    )
 
     init {
         Logger.level = logLevel
@@ -123,6 +152,14 @@ class BandwidthRTC(
     suspend fun connect(authParams: RtcAuthParams, options: RtcOptions? = null) {
         Logger.info("BandwidthRTC connect() called")
         if (isConnected) throw BandwidthRTCError.AlreadyConnected()
+
+        // A prior session's reconnect loop may still be retrying in the background - stop and
+        // wait for it before starting a fresh session, or its establishSession() could finish
+        // after this one and stomp the signaling/peerConnectionManager fields with a session
+        // this call never asked for. Its retained streams belong to that dead session too.
+        reconnectJob?.cancelAndJoin()
+        reconnectJob = null
+        publishRecords.clear()
 
         this.authParams = authParams
         this.options = options
@@ -166,8 +203,11 @@ class BandwidthRTC(
         } else {
             Logger.info("Initializing mixing device...")
             val mixing = MixingAudioDevice(context, options?.audioProcessing ?: AudioProcessingOptions())
-            mixing.onLocalAudioLevel = { samples -> onLocalAudioLevel?.invoke(samples) }
-            mixing.onRemoteAudioLevel = { samples -> onRemoteAudioLevel?.invoke(samples) }
+            mixing.onLocalAudioLevel = { samples -> safeCallback("onLocalAudioLevel") { onLocalAudioLevel?.invoke(samples) } }
+            mixing.onRemoteAudioLevel = { samples -> safeCallback("onRemoteAudioLevel") { onRemoteAudioLevel?.invoke(samples) } }
+            // A fresh MixingAudioDevice always starts on the earpiece - reapply whatever the
+            // caller last chose via setSpeakerphoneOn() rather than silently reverting it.
+            mixing.setSpeakerphoneOn(speakerphoneEnabled)
             this.mixingDevice = mixing
 
             Logger.info("Initializing peer connection manager...")
@@ -188,13 +228,13 @@ class BandwidthRTC(
                 tags = metadata?.tags
             )
             Logger.info("onStreamAvailable: ${rtcStream.streamId}")
-            onStreamAvailable?.invoke(rtcStream)
+            safeCallback("onStreamAvailable") { onStreamAvailable?.invoke(rtcStream) }
         }
         pcMgr.onStreamUnavailable = { streamId ->
             Logger.info("onStreamUnavailable: $streamId")
-            onStreamUnavailable?.invoke(streamId)
+            safeCallback("onStreamUnavailable") { onStreamUnavailable?.invoke(streamId) }
         }
-        pcMgr.onDtmfSent = { event -> onDtmfSent?.invoke(event) }
+        pcMgr.onDtmfSent = { event -> safeCallback("onDtmfSent") { onDtmfSent?.invoke(event) } }
         pcMgr.onSubscribingIceConnectionStateChange = { state ->
             Logger.info("Subscribe ICE state changed: $state")
             if (state == PeerConnection.IceConnectionState.DISCONNECTED ||
@@ -202,7 +242,7 @@ class BandwidthRTC(
             ) {
                 Logger.info("Subscribe ICE disconnected/failed — remote side likely hung up, clearing active call")
                 hasActiveCall = false
-                onRemoteDisconnected?.invoke()
+                safeCallback("onRemoteDisconnected") { onRemoteDisconnected?.invoke() }
             }
         }
 
@@ -233,14 +273,20 @@ class BandwidthRTC(
             endpointId = mediaResult.endpointId,
             deviceId = mediaResult.deviceId
         )
-        onReady?.invoke(readyMetadata)
+        safeCallback("onReady") { onReady?.invoke(readyMetadata) }
     }
 
     /** Disconnect from the BRTC platform. */
     suspend fun disconnect() {
         Logger.info("BandwidthRTC disconnect() called")
         userInitiatedDisconnect = true
-        reconnectJob?.cancel()
+        // cancel() alone only marks the job cancelled - establishSession()'s RPCs suspend on
+        // plain suspendCoroutine, which isn't cancellable, so a reconnect already in flight
+        // would otherwise keep running and could finish (setting isConnected = true again)
+        // after this function returns. Joining waits for it to actually finish - whether that
+        // means it unwinds via the cancellation or completes and hands back a live session -
+        // so cleanupSession() below is always the last word.
+        reconnectJob?.cancelAndJoin()
         reconnectJob = null
         publishRecords.clear()
         cleanupSession()
@@ -262,14 +308,39 @@ class BandwidthRTC(
     }
 
     /**
+     * Invokes an application-supplied callback without letting it take the SDK down with it.
+     * Several of these run directly on a native audio callback thread rather than one of
+     * [scope]'s coroutines, so a throwing handler is not just a cancelled coroutine away from
+     * being caught elsewhere - it would otherwise propagate into WebRTC/OS code that isn't
+     * expecting it.
+     */
+    private inline fun safeCallback(name: String, block: () -> Unit) {
+        try {
+            block()
+        } catch (e: Throwable) {
+            Logger.error("$name threw: ${e.message}")
+        }
+    }
+
+    /**
      * Releases the media resources of a session that is over. Peer connections go first because they
      * may still reference the audio device while closing.
      */
     private fun releaseMedia() {
-        peerConnectionManager?.cleanup()
-        peerConnectionManager = null
-        mixingDevice?.release()
-        mixingDevice = null
+        // Capture-and-null happens under the lock so two concurrent callers (the "close" event
+        // firing on a websocket callback thread while the app calls disconnect() on its own)
+        // can never both observe the same non-null instance - only one of them gets it, so
+        // cleanup()/release() below run at most once per instance.
+        val pcMgrToRelease: PeerConnectionManagerInterface?
+        val mixingToRelease: MixingAudioDevice?
+        synchronized(mediaLock) {
+            pcMgrToRelease = peerConnectionManager
+            peerConnectionManager = null
+            mixingToRelease = mixingDevice
+            mixingDevice = null
+        }
+        pcMgrToRelease?.cleanup()
+        mixingToRelease?.release()
     }
 
     /** Publish local audio. Adds local tracks, then creates a client-initiated offer sent via offerSdp. */
@@ -300,7 +371,7 @@ class BandwidthRTC(
         if (audio) mediaTypes.add(MediaType.AUDIO)
 
         val stream = RtcStream(mediaStream = mediaStream, mediaTypes = mediaTypes, alias = alias)
-        publishRecords.add(PublishRecord(audio = audio, alias = alias, stream = stream))
+        publishRecords.add(PublishRecord(id = stream.streamId, audio = audio, alias = alias, stream = stream))
         Logger.info("Published stream ${stream.streamId}")
         return stream
     }
@@ -314,7 +385,7 @@ class BandwidthRTC(
             throw BandwidthRTCError.NotConnected()
         }
 
-        publishRecords.removeIf { it.stream.streamId == stream.streamId }
+        publishRecords.removeIf { it.id == stream.streamId }
         pcManager.removeLocalTracks(streamId = stream.streamId)
 
         val localOffer = pcManager.createPublishOffer()
@@ -327,12 +398,18 @@ class BandwidthRTC(
     /** Enable or disable the microphone for all published streams. */
     fun setMicEnabled(enabled: Boolean) {
         Logger.info("BandwidthRTC setMicEnabled($enabled)")
+        // Retained so a reconnect's fresh, always-enabled tracks can be muted back to match -
+        // republishing otherwise silently un-mutes the caller.
+        micEnabled = enabled
         peerConnectionManager?.setAudioEnabled(enabled)
     }
 
     /** Route audio to the speakerphone or earpiece. */
     fun setSpeakerphoneOn(enabled: Boolean) {
         Logger.info("BandwidthRTC setSpeakerphoneOn($enabled)")
+        // Retained so a reconnect's brand new MixingAudioDevice (which always starts on the
+        // earpiece) can be put back where the caller left it.
+        speakerphoneEnabled = enabled
         mixingDevice?.setSpeakerphoneOn(enabled)
     }
 
@@ -360,7 +437,7 @@ class BandwidthRTC(
         ) { snapshot ->
             val level = snapshot.audioLevel.toFloat()
             val samples = FloatArray(9600) { level }
-            onRemoteAudioLevel?.invoke(samples)
+            safeCallback("onRemoteAudioLevel") { onRemoteAudioLevel?.invoke(samples) }
             completion(snapshot)
         }
     }
@@ -426,7 +503,7 @@ class BandwidthRTC(
                 }
             }
             Logger.debug("Ready event: endpoint=${metadata.endpointId}")
-            onReady?.invoke(metadata)
+            safeCallback("onReady") { onReady?.invoke(metadata) }
         }
 
         signaling.onEvent("established") {
@@ -485,6 +562,14 @@ class BandwidthRTC(
                 republishStreams()
                 Logger.info("Reconnected successfully")
                 return
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // A cancellable suspension point inside this attempt (e.g. the ICE-connect wait)
+                // observed disconnect()'s cancelAndJoin(). Unwind immediately instead of logging
+                // this as a failed attempt and looping back to a delay() that would just throw
+                // the same way - discardSession() still needs to run so the half-built attempt
+                // doesn't leak.
+                discardSession()
+                throw e
             } catch (e: Exception) {
                 lastError = e
                 Logger.error("Reconnect attempt $attempt failed: ${e.message}")
@@ -498,7 +583,7 @@ class BandwidthRTC(
         }
 
         Logger.error("Reconnect gave up - session is dead")
-        onError?.invoke(lastError ?: BandwidthRTCError.WebSocketDisconnected())
+        safeCallback("onError") { onError?.invoke(lastError ?: BandwidthRTCError.WebSocketDisconnected()) }
     }
 
     /** Handshake failures that recur on every attempt, so retrying only delays the error. */
@@ -532,12 +617,18 @@ class BandwidthRTC(
         pcManager.waitForPublishIceConnected()
 
         for (record in publishRecords) {
-            val mediaStream = pcManager.republishLocalStream(streamId = record.stream.streamId, audio = record.audio)
+            val mediaStream = pcManager.republishLocalStream(streamId = record.id, audio = record.audio)
             record.stream = RtcStream(
                 mediaStream = mediaStream,
                 mediaTypes = record.stream.mediaTypes,
                 alias = record.alias
             )
+        }
+
+        // A fresh republished track always comes back enabled - put it back the way the
+        // application last left it via setMicEnabled() rather than silently un-muting.
+        if (!micEnabled) {
+            pcManager.setAudioEnabled(false)
         }
 
         // A single renegotiation covers every republished stream.

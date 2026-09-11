@@ -14,6 +14,8 @@ import kotlin.coroutines.resumeWithException
 import kotlin.coroutines.suspendCoroutine
 import org.webrtc.MediaStreamTrack
 
+private const val PUBLISH_ICE_CONNECT_TIMEOUT_MS = 10_000L
+
 class PeerConnectionManager(
     private val context: Context,
     private val options: RtcOptions?,
@@ -110,7 +112,13 @@ class PeerConnectionManager(
             log.debug("Publish ICE already connected, skipping wait")
             return
         }
+        val deadline = System.currentTimeMillis() + PUBLISH_ICE_CONNECT_TIMEOUT_MS
         while (!publishIceConnected) {
+            if (System.currentTimeMillis() >= deadline) {
+                throw BandwidthRTCError.PublishFailed(
+                    "Publish peer connection did not reach connected within ${PUBLISH_ICE_CONNECT_TIMEOUT_MS}ms"
+                )
+            }
             delay(50)
         }
     }
