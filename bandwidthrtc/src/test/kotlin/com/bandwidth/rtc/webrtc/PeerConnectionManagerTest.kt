@@ -3,6 +3,8 @@ package com.bandwidth.rtc.webrtc
 import android.content.Context
 import com.bandwidth.rtc.types.*
 import io.mockk.*
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.*
@@ -898,6 +900,39 @@ class PeerConnectionManagerTest {
         // Disposing the factory out from under a call that is already inside WebRTC is the crash
         // this guard exists to prevent, so the ordering is the whole point.
         assertEquals(listOf("dtmf-start", "dtmf-end", "dispose"), order.toList())
+    }
+
+    @Test
+    fun `subscribe negotiation stops short when cleanup lands mid-suspension`() = runTest {
+        manager.setupPublishingPeerConnection()
+        manager.setupSubscribingPeerConnection()
+
+        val observer = slot<SdpObserver>()
+        every { mockSubscribePc.setRemoteDescription(capture(observer), any()) } just Runs
+        // Resumes immediately so the negotiation terminates either way: if the guard ever
+        // regresses, this test has to fail rather than hang on a suspension that never resumes
+        // (a non-cancellable one cannot be unstuck, in a test or in production).
+        every { mockSubscribePc.createAnswer(any(), any()) } answers {
+            firstArg<SdpObserver>().onCreateFailure("createAnswer should not have been reached")
+        }
+
+        var error: Throwable? = null
+        val job = launch {
+            error = runCatching {
+                manager.handleSubscribeSdpOffer("offer", sdpRevision = 1, metadata = null)
+            }.exceptionOrNull()
+        }
+        runCurrent()
+
+        // The "sdpOffer" signaling handler launches an untracked coroutine, so a gateway close can
+        // dispose the subscribing PC while a renegotiation sits here, suspended on WebRTC's
+        // callback - the entry check passed long before disposal happened.
+        manager.cleanup()
+        observer.captured.onSetSuccess()
+        job.join()
+
+        verify(exactly = 0) { mockSubscribePc.createAnswer(any(), any()) }
+        assertTrue("expected SdpNegotiationFailed, got $error", error is BandwidthRTCError.SdpNegotiationFailed)
     }
 
     @Test(expected = BandwidthRTCError.PublishFailed::class)

@@ -9,6 +9,7 @@ import org.webrtc.audio.AudioDeviceModule
 import java.nio.ByteBuffer
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.coroutines.Continuation
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.coroutines.suspendCoroutine
@@ -69,6 +70,21 @@ class PeerConnectionManager(
 
     /** Number of calls currently inside [useNative], i.e. holding a live reference to a handle. */
     private var activeNativeCalls = 0
+
+    /**
+     * Makes one SDP call with its peer connection guaranteed alive, failing the negotiation if the
+     * manager has already been cleaned up.
+     *
+     * Only the calls issued from our own coroutine's thread need this. The nested
+     * setLocalDescription() calls do not: they run inside a WebRTC observer callback on the
+     * signaling thread, and dispose() blocks on that same thread, so WebRTC itself serializes them
+     * against teardown.
+     */
+    private fun <T> Continuation<T>.withLiveNative(block: () -> Unit) {
+        useNative(block) ?: resumeWithException(
+            BandwidthRTCError.SdpNegotiationFailed("Peer connection manager has been cleaned up")
+        )
+    }
 
     /**
      * Runs [block] with the native handles guaranteed alive, or returns null if the manager has
@@ -170,12 +186,15 @@ class PeerConnectionManager(
 
     /**
      * The SDP negotiation methods below suspend on WebRTC's own observer callbacks, so they cannot
-     * register with [useNative] for the whole call the way the synchronous entry points do - the
-     * registration would hold disposal off across a suspension of unbounded length. They check
-     * [disposed] on entry instead, which leaves a window if a teardown lands between a suspension
-     * and the next native call. That is acceptable because, unlike getCallStats() or sendDtmf(),
-     * none of them is reachable from application code: all four are driven by the SDK's own
-     * session coroutines, which a teardown cancels.
+     * register with [useNative] for the whole call the way the synchronous entry points do - that
+     * would hold disposal off across a suspension of unbounded length. Each individual native call
+     * is registered instead, via [withLiveNative]: the calls themselves are synchronous, so a
+     * teardown landing during a suspension is caught by the next one rather than crashing in it.
+     *
+     * The entry checks on [disposed] are only a fast path. They are not the guarantee, because the
+     * session coroutine driving a negotiation is not always cancelled by a teardown - the
+     * "sdpOffer" signaling event handler launches an untracked coroutine, so a renegotiation
+     * arriving as the socket closes can be mid-suspension when cleanup() runs.
      */
     override suspend fun answerInitialOffer(sdpOffer: String, pcType: PeerConnectionType): String {
         if (disposed) throw BandwidthRTCError.SdpNegotiationFailed("Peer connection manager has been cleaned up")
@@ -187,38 +206,42 @@ class PeerConnectionManager(
         val offer = SessionDescription(SessionDescription.Type.OFFER, sdpOffer)
 
         suspendCoroutine { continuation ->
-            pc.setRemoteDescription(object : SdpObserver {
-                override fun onSetSuccess() = continuation.resume(Unit)
-                override fun onSetFailure(error: String?) =
-                    continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "setRemoteDescription failed"))
-                override fun onCreateSuccess(sdp: SessionDescription?) {}
-                override fun onCreateFailure(error: String?) {}
-            }, offer)
+            continuation.withLiveNative {
+                pc.setRemoteDescription(object : SdpObserver {
+                    override fun onSetSuccess() = continuation.resume(Unit)
+                    override fun onSetFailure(error: String?) =
+                        continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "setRemoteDescription failed"))
+                    override fun onCreateSuccess(sdp: SessionDescription?) {}
+                    override fun onCreateFailure(error: String?) {}
+                }, offer)
+            }
         }
 
         val answerConstraints = MediaConstraints()
         val answerSdp = suspendCoroutine { continuation ->
-            pc.createAnswer(object : SdpObserver {
-                override fun onCreateSuccess(sdp: SessionDescription?) {
-                    if (sdp == null) {
-                        continuation.resumeWithException(
-                            BandwidthRTCError.SdpNegotiationFailed("No SDP answer generated")
-                        )
-                        return
+            continuation.withLiveNative {
+                pc.createAnswer(object : SdpObserver {
+                    override fun onCreateSuccess(sdp: SessionDescription?) {
+                        if (sdp == null) {
+                            continuation.resumeWithException(
+                                BandwidthRTCError.SdpNegotiationFailed("No SDP answer generated")
+                            )
+                            return
+                        }
+                        pc.setLocalDescription(object : SdpObserver {
+                            override fun onSetSuccess() = continuation.resume(sdp.description)
+                            override fun onSetFailure(error: String?) =
+                                continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "setLocalDescription failed"))
+                            override fun onCreateSuccess(sdp: SessionDescription?) {}
+                            override fun onCreateFailure(error: String?) {}
+                        }, sdp)
                     }
-                    pc.setLocalDescription(object : SdpObserver {
-                        override fun onSetSuccess() = continuation.resume(sdp.description)
-                        override fun onSetFailure(error: String?) =
-                            continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "setLocalDescription failed"))
-                        override fun onCreateSuccess(sdp: SessionDescription?) {}
-                        override fun onCreateFailure(error: String?) {}
-                    }, sdp)
-                }
-                override fun onCreateFailure(error: String?) =
-                    continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "createAnswer failed"))
-                override fun onSetSuccess() {}
-                override fun onSetFailure(error: String?) {}
-            }, answerConstraints)
+                    override fun onCreateFailure(error: String?) =
+                        continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "createAnswer failed"))
+                    override fun onSetSuccess() {}
+                    override fun onSetFailure(error: String?) {}
+                }, answerConstraints)
+            }
         }
 
         return answerSdp
@@ -302,27 +325,29 @@ class PeerConnectionManager(
         }
 
         val offerSdp = suspendCoroutine { continuation ->
-            pc.createOffer(object : SdpObserver {
-                override fun onCreateSuccess(sdp: SessionDescription?) {
-                    if (sdp == null) {
-                        continuation.resumeWithException(
-                            BandwidthRTCError.SdpNegotiationFailed("No SDP offer generated")
-                        )
-                        return
+            continuation.withLiveNative {
+                pc.createOffer(object : SdpObserver {
+                    override fun onCreateSuccess(sdp: SessionDescription?) {
+                        if (sdp == null) {
+                            continuation.resumeWithException(
+                                BandwidthRTCError.SdpNegotiationFailed("No SDP offer generated")
+                            )
+                            return
+                        }
+                        pc.setLocalDescription(object : SdpObserver {
+                            override fun onSetSuccess() = continuation.resume(sdp.description)
+                            override fun onSetFailure(error: String?) =
+                                continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "setLocalDescription failed"))
+                            override fun onCreateSuccess(sdp: SessionDescription?) {}
+                            override fun onCreateFailure(error: String?) {}
+                        }, sdp)
                     }
-                    pc.setLocalDescription(object : SdpObserver {
-                        override fun onSetSuccess() = continuation.resume(sdp.description)
-                        override fun onSetFailure(error: String?) =
-                            continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "setLocalDescription failed"))
-                        override fun onCreateSuccess(sdp: SessionDescription?) {}
-                        override fun onCreateFailure(error: String?) {}
-                    }, sdp)
-                }
-                override fun onCreateFailure(error: String?) =
-                    continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "createOffer failed"))
-                override fun onSetSuccess() {}
-                override fun onSetFailure(error: String?) {}
-            }, offerConstraints)
+                    override fun onCreateFailure(error: String?) =
+                        continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "createOffer failed"))
+                    override fun onSetSuccess() {}
+                    override fun onSetFailure(error: String?) {}
+                }, offerConstraints)
+            }
         }
 
         log.debug("Publish SDP offer created")
@@ -337,13 +362,15 @@ class PeerConnectionManager(
         val answer = SessionDescription(SessionDescription.Type.ANSWER, remoteAnswer)
 
         suspendCoroutine { continuation ->
-            pc.setRemoteDescription(object : SdpObserver {
-                override fun onSetSuccess() = continuation.resume(Unit)
-                override fun onSetFailure(error: String?) =
-                    continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "setRemoteDescription failed"))
-                override fun onCreateSuccess(sdp: SessionDescription?) {}
-                override fun onCreateFailure(error: String?) {}
-            }, answer)
+            continuation.withLiveNative {
+                pc.setRemoteDescription(object : SdpObserver {
+                    override fun onSetSuccess() = continuation.resume(Unit)
+                    override fun onSetFailure(error: String?) =
+                        continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "setRemoteDescription failed"))
+                    override fun onCreateSuccess(sdp: SessionDescription?) {}
+                    override fun onCreateFailure(error: String?) {}
+                }, answer)
+            }
         }
 
         log.debug("Publish SDP answer applied")
@@ -377,55 +404,59 @@ class PeerConnectionManager(
 
         log.debug("[subscribe] setRemoteDescription...")
         suspendCoroutine { continuation ->
-            pc.setRemoteDescription(object : SdpObserver {
-                override fun onSetSuccess() {
-                    log.debug("[subscribe] setRemoteDescription SUCCESS")
-                    continuation.resume(Unit)
-                }
-                override fun onSetFailure(error: String?) {
-                    log.error("[subscribe] setRemoteDescription FAILED: $error")
-                    continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "setRemoteDescription failed"))
-                }
-                override fun onCreateSuccess(sdp: SessionDescription?) {}
-                override fun onCreateFailure(error: String?) {}
-            }, offer)
+            continuation.withLiveNative {
+                pc.setRemoteDescription(object : SdpObserver {
+                    override fun onSetSuccess() {
+                        log.debug("[subscribe] setRemoteDescription SUCCESS")
+                        continuation.resume(Unit)
+                    }
+                    override fun onSetFailure(error: String?) {
+                        log.error("[subscribe] setRemoteDescription FAILED: $error")
+                        continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "setRemoteDescription failed"))
+                    }
+                    override fun onCreateSuccess(sdp: SessionDescription?) {}
+                    override fun onCreateFailure(error: String?) {}
+                }, offer)
+            }
         }
 
         log.debug("[subscribe] createAnswer...")
         val answerConstraints = MediaConstraints()
 
         val answerSdp = suspendCoroutine { continuation ->
-            pc.createAnswer(object : SdpObserver {
-                override fun onCreateSuccess(sdp: SessionDescription?) {
-                    if (sdp == null) {
-                        log.error("[subscribe] createAnswer returned null")
-                        continuation.resumeWithException(
-                            BandwidthRTCError.SdpNegotiationFailed("No SDP answer generated")
-                        )
-                        return
-                    }
+            continuation.withLiveNative {
+                pc.createAnswer(object : SdpObserver {
+                    override fun onCreateSuccess(sdp: SessionDescription?) {
+                        if (sdp == null) {
+                            log.error("[subscribe] createAnswer returned null")
+                            continuation.resumeWithException(
+                                BandwidthRTCError.SdpNegotiationFailed("No SDP answer generated")
+                            )
+                            return
+                        }
 
-                    log.debug("[subscribe] setLocalDescription...")
-                    pc.setLocalDescription(object : SdpObserver {
-                        override fun onSetSuccess() {
-                            log.debug("[subscribe] setLocalDescription SUCCESS")
-                            continuation.resume(sdp.description)
-                        }
-                        override fun onSetFailure(error: String?) {
-                            log.error("[subscribe] setLocalDescription FAILED: $error")
-                            continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "setLocalDescription failed"))
-                        }
-                        override fun onCreateSuccess(sdp: SessionDescription?) {}
-                        override fun onCreateFailure(error: String?) {}
-                    }, sdp)
-                }
-                override fun onCreateFailure(error: String?) {
-                    log.error("[subscribe] createAnswer FAILED: $error")
-                    continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "createAnswer failed"))
-                }
-                override fun onSetSuccess() {}
-                override fun onSetFailure(error: String?) {}
-            }, answerConstraints)
+                        log.debug("[subscribe] setLocalDescription...")
+                        pc.setLocalDescription(object : SdpObserver {
+                            override fun onSetSuccess() {
+                                log.debug("[subscribe] setLocalDescription SUCCESS")
+                                continuation.resume(sdp.description)
+                            }
+                            override fun onSetFailure(error: String?) {
+                                log.error("[subscribe] setLocalDescription FAILED: $error")
+                                continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "setLocalDescription failed"))
+                            }
+                            override fun onCreateSuccess(sdp: SessionDescription?) {}
+                            override fun onCreateFailure(error: String?) {}
+                        }, sdp)
+                    }
+                    override fun onCreateFailure(error: String?) {
+                        log.error("[subscribe] createAnswer FAILED: $error")
+                        continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "createAnswer failed"))
+                    }
+                    override fun onSetSuccess() {}
+                    override fun onSetFailure(error: String?) {}
+                }, answerConstraints)
+            }
         }
 
         subscribeSdpRevision = effectiveRevision
