@@ -8,6 +8,8 @@ import com.bandwidth.rtc.signaling.rpc.SetMediaPreferencesResult
 import com.bandwidth.rtc.types.*
 import com.bandwidth.rtc.webrtc.PeerConnectionManagerInterface
 import io.mockk.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.*
@@ -43,7 +45,12 @@ class BandwidthRTCOrderOfOperationsTest {
         brtc = BandwidthRTC(
             context = context,
             signaling = mockSignaling,
-            peerConnectionManager = mockPCManager
+            peerConnectionManager = mockPCManager,
+            // onReady/onError are dispatched via scope.launch (see BandwidthRTC.kt) rather than
+            // invoked inline, so they need a scope the test can actually drive. Unconfined runs
+            // launched coroutines eagerly on the calling thread instead of needing an explicit
+            // advanceUntilIdle() after every assertion on those callbacks.
+            scope = CoroutineScope(UnconfinedTestDispatcher())
         )
     }
 

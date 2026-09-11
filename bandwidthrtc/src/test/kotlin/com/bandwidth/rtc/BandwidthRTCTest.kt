@@ -8,6 +8,8 @@ import com.bandwidth.rtc.signaling.rpc.SetMediaPreferencesResult
 import com.bandwidth.rtc.types.*
 import com.bandwidth.rtc.webrtc.PeerConnectionManagerInterface
 import io.mockk.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.*
@@ -33,7 +35,12 @@ class BandwidthRTCTest {
         brtc = BandwidthRTC(
             context = context,
             signaling = mockSignaling,
-            peerConnectionManager = mockPCManager
+            peerConnectionManager = mockPCManager,
+            // onReady/onError are dispatched via scope.launch (see BandwidthRTC.kt) rather than
+            // invoked inline, so they need a scope the test can actually drive. Unconfined runs
+            // launched coroutines eagerly on the calling thread instead of needing an explicit
+            // advanceUntilIdle() after every assertion on those callbacks.
+            scope = CoroutineScope(UnconfinedTestDispatcher())
         )
     }
 
@@ -258,6 +265,26 @@ class BandwidthRTCTest {
         val stream = brtc.publish(audio = false)
 
         assertFalse(stream.mediaTypes.contains(MediaType.AUDIO))
+    }
+
+    @Test
+    fun `publish applies a mic mute set before this stream existed`() = runTest {
+        connectBrtc()
+        brtc.setMicEnabled(false)
+        clearMocks(mockPCManager, answers = false, recordedCalls = true)
+
+        val mockStream = buildMockMediaStream("s3")
+        coEvery { mockPCManager.waitForPublishIceConnected() } just Runs
+        every { mockPCManager.addLocalTracks(any()) } returns mockStream
+        coEvery { mockPCManager.createPublishOffer() } returns "offer"
+        coEvery { mockSignaling.offerSdp(any(), any()) } returns OfferSdpResult("answer")
+        coEvery { mockPCManager.applyPublishAnswer(any()) } just Runs
+
+        brtc.publish(audio = true)
+
+        // A fresh track from addLocalTracks() always comes back enabled - the mute set before
+        // any stream existed must be reapplied once there is a track for it to apply to.
+        verify { mockPCManager.setAudioEnabled(false) }
     }
 
     // -------------------------------------------------------------------------

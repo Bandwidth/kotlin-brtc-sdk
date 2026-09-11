@@ -161,6 +161,16 @@ class BandwidthRTC(
         reconnectJob = null
         publishRecords.clear()
 
+        // cancelAndJoin() cannot preempt establishSession()'s non-cancellable RPCs, so the
+        // reconnect attempt may have run to completion - using the old authParams - while this
+        // call was waiting for it. That session was never asked for by this call and may not
+        // even use the credentials the caller just passed in, so tear it down rather than
+        // walking into a live session that isn't the one being requested.
+        if (isConnected) {
+            Logger.info("connect() found a session the reconnect loop finished while waiting - tearing it down")
+            cleanupSession()
+        }
+
         this.authParams = authParams
         this.options = options
         userInitiatedDisconnect = false
@@ -269,11 +279,28 @@ class BandwidthRTC(
         hasActiveCall = true
         Logger.info("Connected to BRTC (endpoint=${mediaResult.endpointId ?: "unknown"})")
 
+        if (userInitiatedDisconnect) {
+            // disconnect() was called while this attempt (running inside the reconnect job it
+            // is joining) was already underway. isConnected/hasActiveCall are already true above
+            // and cleanupSession() is about to flip them back once the join returns - but there
+            // is no reason to tell the application it is "ready" for a session that is already
+            // on its way out.
+            Logger.info("Suppressing onReady - disconnect() was called while this session was being established")
+            return
+        }
+
         val readyMetadata = ReadyMetadata(
             endpointId = mediaResult.endpointId,
             deviceId = mediaResult.deviceId
         )
-        safeCallback("onReady") { onReady?.invoke(readyMetadata) }
+        // Dispatched onto scope rather than invoked inline: when this establishSession() call
+        // came from the reconnect loop, invoking onReady inline runs it inside reconnectJob's
+        // own coroutine. An application that reacts to onReady by (synchronously, via a
+        // blocking bridge) calling disconnect() or connect() would then have that call's
+        // cancelAndJoin() try to join the very job it's running inside of - a self-join
+        // deadlock. Launching it as its own coroutine means reconnectJob can still complete
+        // independently of whatever the callback does.
+        scope.launch { safeCallback("onReady") { onReady?.invoke(readyMetadata) } }
     }
 
     /** Disconnect from the BRTC platform. */
@@ -357,6 +384,13 @@ class BandwidthRTC(
         Logger.debug("Publish PC ICE connected — proceeding with publish")
 
         val mediaStream = pcManager.addLocalTracks(audio = audio)
+
+        // A newly added track always comes back enabled - apply a mute the caller set via
+        // setMicEnabled() before this stream existed (e.g. "start muted") instead of silently
+        // ignoring it until whatever the next reconnect happens to be.
+        if (!micEnabled) {
+            pcManager.setAudioEnabled(false)
+        }
 
         val localOffer = pcManager.createPublishOffer()
         Logger.debug("Created publish offer with local tracks")
@@ -583,7 +617,10 @@ class BandwidthRTC(
         }
 
         Logger.error("Reconnect gave up - session is dead")
-        safeCallback("onError") { onError?.invoke(lastError ?: BandwidthRTCError.WebSocketDisconnected()) }
+        // Launched rather than invoked inline for the same reason as onReady above: this runs
+        // inside reconnectJob's own coroutine, and "give up, session is dead" is exactly the
+        // notification an application is most likely to react to by calling disconnect().
+        scope.launch { safeCallback("onError") { onError?.invoke(lastError ?: BandwidthRTCError.WebSocketDisconnected()) } }
     }
 
     /** Handshake failures that recur on every attempt, so retrying only delays the error. */
