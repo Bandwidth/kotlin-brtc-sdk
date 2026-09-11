@@ -25,7 +25,7 @@ interface PeerConnectionManagerInterface {
     suspend fun applyPublishAnswer(remoteAnswer: String)
     suspend fun handleSubscribeSdpOffer(
         sdpOffer: String,
-        sdpRevision: Int?,
+        sdpRevision: Long?,
         metadata: Map<String, TrackMetadata>?
     ): String
 
