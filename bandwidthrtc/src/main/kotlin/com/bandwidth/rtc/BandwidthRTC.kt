@@ -193,7 +193,7 @@ class BandwidthRTC(
      * itself tear down the session - [connect] does that around its own call, but a reconnect
      * attempt failing is expected and handled by retrying with backoff instead.
      */
-    private suspend fun establishSession() {
+    private suspend fun establishSession(isReconnectAttempt: Boolean = false) {
         val authParams = this.authParams ?: throw BandwidthRTCError.NotConnected()
         val options = this.options
 
@@ -293,14 +293,23 @@ class BandwidthRTC(
             endpointId = mediaResult.endpointId,
             deviceId = mediaResult.deviceId
         )
-        // Dispatched onto scope rather than invoked inline: when this establishSession() call
-        // came from the reconnect loop, invoking onReady inline runs it inside reconnectJob's
-        // own coroutine. An application that reacts to onReady by (synchronously, via a
-        // blocking bridge) calling disconnect() or connect() would then have that call's
-        // cancelAndJoin() try to join the very job it's running inside of - a self-join
-        // deadlock. Launching it as its own coroutine means reconnectJob can still complete
-        // independently of whatever the callback does.
-        scope.launch { safeCallback("onReady") { onReady?.invoke(readyMetadata) } }
+        if (isReconnectAttempt) {
+            // Dispatched onto scope rather than invoked inline: this establishSession() call is
+            // running inside reconnectJob's own coroutine, so invoking onReady inline runs the
+            // application's handler there too. An application that reacts to onReady by
+            // (synchronously, via a blocking bridge) calling disconnect() or connect() would
+            // then have that call's cancelAndJoin() try to join the very job it's running
+            // inside of - a self-join deadlock. Launching it as its own coroutine means
+            // reconnectJob can still complete independently of whatever the callback does.
+            scope.launch { safeCallback("onReady") { onReady?.invoke(readyMetadata) } }
+        } else {
+            // The direct connect() path has no such risk - reconnectJob is a separate job from
+            // whatever coroutine is calling connect(), so joining it from within onReady here
+            // can't be a self-join. Keep this path synchronous: an application awaiting
+            // connect() may reasonably expect onReady to have already fired by the time it
+            // returns, and that guarantee should only be given up where it's actually needed.
+            safeCallback("onReady") { onReady?.invoke(readyMetadata) }
+        }
     }
 
     /** Disconnect from the BRTC platform. */
@@ -592,7 +601,7 @@ class BandwidthRTC(
 
             Logger.info("Reconnect attempt $attempt/$RECONNECT_MAX_ATTEMPTS")
             try {
-                establishSession()
+                establishSession(isReconnectAttempt = true)
                 republishStreams()
                 Logger.info("Reconnected successfully")
                 return
@@ -617,6 +626,18 @@ class BandwidthRTC(
         }
 
         Logger.error("Reconnect gave up - session is dead")
+
+        if (userInitiatedDisconnect) {
+            // Cancellation can only be observed at a cancellable suspension point, and there
+            // isn't one between the last attempt's catch block and here on the final iteration
+            // of the loop - so disconnect() can have been called and be waiting on
+            // cancelAndJoin() for this exact coroutine to finish, and still see the loop run to
+            // a normal, uncancelled exhaustion. The application already knows it's disconnected;
+            // it doesn't need to also be told the session it just tore down gave up retrying.
+            Logger.info("Suppressing onError - disconnect() was called while reconnect was finishing up")
+            return
+        }
+
         // Launched rather than invoked inline for the same reason as onReady above: this runs
         // inside reconnectJob's own coroutine, and "give up, session is dead" is exactly the
         // notification an application is most likely to react to by calling disconnect().
