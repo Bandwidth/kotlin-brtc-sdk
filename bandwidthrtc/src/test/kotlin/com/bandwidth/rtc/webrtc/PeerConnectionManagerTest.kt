@@ -819,6 +819,95 @@ class PeerConnectionManagerTest {
         assertEquals(freshStream, result)
     }
 
+    // -------------------------------------------------------------------------
+    // cleanup() vs. concurrent access
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `cleanup disposes native objects only once when called twice`() {
+        manager.setupPublishingPeerConnection()
+        manager.setupSubscribingPeerConnection()
+
+        // disconnect() and a gateway-initiated close can both reach cleanup(); disposing the same
+        // native object twice is a JNI double free, not a harmless no-op.
+        manager.cleanup()
+        manager.cleanup()
+
+        verify(exactly = 1) { mockPublishPc.dispose() }
+        verify(exactly = 1) { mockSubscribePc.dispose() }
+        verify(exactly = 1) { mockFactory.dispose() }
+    }
+
+    @Test
+    fun `application entry points stop touching peer connections after cleanup`() {
+        manager.setupPublishingPeerConnection()
+        manager.setupSubscribingPeerConnection()
+        manager.cleanup()
+
+        // An application polling stats or sending DTMF does not know the session just died, so
+        // these must degrade to no-ops rather than dereference freed peer connections.
+        var snapshot: CallStatsSnapshot? = null
+        manager.getCallStats(0, 0, 0.0) { snapshot = it }
+        manager.sendDtmf("5")
+        manager.setAudioEnabled(false)
+        manager.removeLocalTracks("any-stream")
+
+        assertNotNull(snapshot)
+        verify(exactly = 0) { mockPublishPc.getStats(any()) }
+        verify(exactly = 0) { mockSubscribePc.getStats(any()) }
+    }
+
+    @Test
+    fun `cleanup waits for an in-flight native call before disposing`() {
+        manager.setupPublishingPeerConnection()
+
+        val order = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val inFlight = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+
+        val mockTrack = mockk<MediaStreamTrack>(relaxed = true)
+        val mockDtmf = mockk<DtmfSender>(relaxed = true)
+        val mockSender = mockk<RtpSender>(relaxed = true)
+        every { mockTrack.kind() } returns "audio"
+        every { mockSender.track() } returns mockTrack
+        every { mockSender.dtmf() } returns mockDtmf
+        every { mockDtmf.canInsertDtmf() } returns true
+        every { mockPublishPc.senders } returns listOf(mockSender)
+        every { mockDtmf.insertDtmf(any(), any(), any()) } answers {
+            order.add("dtmf-start")
+            inFlight.countDown()
+            release.await()
+            order.add("dtmf-end")
+            true
+        }
+        every { mockFactory.dispose() } answers { order.add("dispose") }
+
+        val dtmfThread = Thread { manager.sendDtmf("7") }.apply { start() }
+        inFlight.await()
+        val cleanupThread = Thread { manager.cleanup() }.apply { start() }
+
+        // cleanup() must still be blocked draining: an undrained one would be finished by now,
+        // microseconds after it started. The 2s drain timeout leaves ample room for this wait.
+        cleanupThread.join(300)
+        assertTrue("cleanup() disposed while a native call was in flight", cleanupThread.isAlive)
+
+        release.countDown()
+        dtmfThread.join()
+        cleanupThread.join()
+
+        // Disposing the factory out from under a call that is already inside WebRTC is the crash
+        // this guard exists to prevent, so the ordering is the whole point.
+        assertEquals(listOf("dtmf-start", "dtmf-end", "dispose"), order.toList())
+    }
+
+    @Test(expected = BandwidthRTCError.PublishFailed::class)
+    fun `createPublishOffer fails fast after cleanup`() = runTest {
+        manager.setupPublishingPeerConnection()
+        manager.cleanup()
+
+        manager.createPublishOffer()
+    }
+
     private fun buildRealSdp(description: String): SessionDescription =
         SessionDescription(SessionDescription.Type.ANSWER, description)
 
