@@ -298,6 +298,25 @@ class BandwidthRTCTest {
         coVerify { mockPCManager.applyPublishAnswer("unpub-answer") }
     }
 
+    @Test
+    fun `unpublish with a handle whose native stream was disposed uses the captured id`() = runTest {
+        connectBrtc()
+
+        // An RtcStream the app still holds from before a reconnect wraps a MediaStream whose
+        // owning factory has since been disposed; touching it again would be a use-after-free.
+        val mockStream = buildMockMediaStream("stale-stream")
+        val rtcStream = RtcStream(mediaStream = mockStream, mediaTypes = listOf(MediaType.AUDIO))
+        every { mockStream.id } throws IllegalStateException("MediaStream has been disposed")
+
+        coEvery { mockPCManager.createPublishOffer() } returns "unpub-offer"
+        coEvery { mockSignaling.offerSdp("unpub-offer", "publish") } returns OfferSdpResult("unpub-answer")
+        coEvery { mockPCManager.applyPublishAnswer("unpub-answer") } just Runs
+
+        brtc.unpublish(rtcStream)
+
+        verify { mockPCManager.removeLocalTracks("stale-stream") }
+    }
+
     // -------------------------------------------------------------------------
     // setMicEnabled()
     // -------------------------------------------------------------------------
