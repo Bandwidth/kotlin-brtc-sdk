@@ -139,6 +139,22 @@ class MixingAudioDevice(context: Context, audioProcessing: AudioProcessingOption
         log.debug("MixingAudioDevice created (hardwareAec=${audioProcessing.enableHardwareAec}, hardwareNs=${audioProcessing.enableHardwareNoiseSuppressor})")
     }
 
+    /**
+     * Mute or unmute the microphone at the audio device, which zeroes each captured buffer
+     * before it reaches the encoder.
+     *
+     * This is deliberately not `AudioTrack.setEnabled(false)`. Disabling the last enabled local
+     * audio track makes WebRTC's audio device module stop the capture device outright, so the
+     * sender emits no RTP at all - and the platform decides an endpoint is eligible for calls
+     * only once it has seen a published track arrive, so a muted endpoint would become
+     * permanently uncallable. Muting here keeps capture running and keeps sending, just with
+     * silence, so mute stays a question about audio rather than about reachability.
+     */
+    fun setMicrophoneMute(mute: Boolean) {
+        audioDeviceModule.setMicrophoneMute(mute)
+        log.debug("Microphone ${if (mute) "muted" else "unmuted"}")
+    }
+
     @Suppress("DEPRECATION")
     fun setSpeakerphoneOn(enabled: Boolean) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {

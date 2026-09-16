@@ -11,5 +11,6 @@ internal interface WebSocketEventListener {
     fun onMessage(text: String)
     fun onClosing(code: Int, reason: String)
     fun onClosed(code: Int, reason: String)
-    fun onFailure(throwable: Throwable)
+    /** [httpStatusCode] carries the handshake response status when the upgrade itself was rejected. */
+    fun onFailure(throwable: Throwable, httpStatusCode: Int? = null)
 }

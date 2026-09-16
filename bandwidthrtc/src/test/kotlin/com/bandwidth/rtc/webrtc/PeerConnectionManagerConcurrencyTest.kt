@@ -20,7 +20,6 @@ import java.util.concurrent.atomic.AtomicInteger
  *
  * Covers:
  * - Concurrent access to publishedStreams (ConcurrentHashMap)
- * - Concurrent setAudioEnabled calls
  * - Concurrent sendDtmf calls
  * - Concurrent getCallStats calls
  * - Thread-safety of subscribeSdpRevision
@@ -61,43 +60,6 @@ class PeerConnectionManagerConcurrencyTest {
     @After
     fun tearDown() {
         unmockkAll()
-    }
-
-    // =========================================================================
-    // Concurrent setAudioEnabled
-    // =========================================================================
-
-    @Test
-    fun `concurrent setAudioEnabled calls do not crash`() {
-        manager.setupPublishingPeerConnection()
-
-        val mockTrack = mockk<AudioTrack>(relaxed = true)
-        val realStream = MediaStream(0L)
-        realStream.audioTracks.add(mockTrack)
-        injectPublishedStream("s1", realStream)
-
-        val threads = 8
-        val barrier = CyclicBarrier(threads)
-        val latch = CountDownLatch(threads)
-        val errors = AtomicInteger(0)
-
-        repeat(threads) {
-            Thread {
-                try {
-                    barrier.await()
-                    repeat(50) { i ->
-                        manager.setAudioEnabled(i % 2 == 0)
-                    }
-                } catch (e: Exception) {
-                    errors.incrementAndGet()
-                } finally {
-                    latch.countDown()
-                }
-            }.start()
-        }
-
-        assertTrue(latch.await(5, TimeUnit.SECONDS))
-        assertEquals(0, errors.get())
     }
 
     // =========================================================================

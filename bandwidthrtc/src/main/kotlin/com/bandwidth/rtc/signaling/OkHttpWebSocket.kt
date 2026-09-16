@@ -35,7 +35,7 @@ internal class OkHttpWebSocket(
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                listener.onFailure(t)
+                listener.onFailure(t, response?.code)
             }
         })
     }

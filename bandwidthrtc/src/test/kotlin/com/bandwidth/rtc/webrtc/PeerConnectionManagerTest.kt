@@ -3,6 +3,8 @@ package com.bandwidth.rtc.webrtc
 import android.content.Context
 import com.bandwidth.rtc.types.*
 import io.mockk.*
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.*
@@ -517,38 +519,6 @@ class PeerConnectionManagerTest {
     }
 
     // -------------------------------------------------------------------------
-    // setAudioEnabled()
-    // -------------------------------------------------------------------------
-
-    @Test
-    fun `setAudioEnabled disables all published audio tracks`() {
-        manager.setupPublishingPeerConnection()
-
-        val mockTrack = mockk<AudioTrack>(relaxed = true)
-        val realStream = MediaStream(0L)
-        realStream.audioTracks.add(mockTrack)
-        injectPublishedStream("s1", realStream)
-
-        manager.setAudioEnabled(false)
-
-        verify { mockTrack.setEnabled(false) }
-    }
-
-    @Test
-    fun `setAudioEnabled enables all published audio tracks`() {
-        manager.setupPublishingPeerConnection()
-
-        val mockTrack = mockk<AudioTrack>(relaxed = true)
-        val realStream = MediaStream(0L)
-        realStream.audioTracks.add(mockTrack)
-        injectPublishedStream("s1", realStream)
-
-        manager.setAudioEnabled(true)
-
-        verify { mockTrack.setEnabled(true) }
-    }
-
-    // -------------------------------------------------------------------------
     // sendDtmf()
     // -------------------------------------------------------------------------
 
@@ -748,6 +718,198 @@ class PeerConnectionManagerTest {
     // -------------------------------------------------------------------------
 
     /** Use a real SessionDescription — its `description` field is public final and can't be mocked. */
+
+    // -------------------------------------------------------------------------
+    // republishLocalStream()
+    // -------------------------------------------------------------------------
+
+    @Test(expected = BandwidthRTCError.PublishFailed::class)
+    fun `republishLocalStream throws PublishFailed when publishing PC not set up`() {
+        manager.republishLocalStream("stream-1", audio = true)
+    }
+
+    @Test
+    fun `republishLocalStream re-attaches a still live track`() {
+        manager.setupPublishingPeerConnection()
+
+        val liveTrack = mockk<AudioTrack>(relaxed = true)
+        every { liveTrack.state() } returns MediaStreamTrack.State.LIVE
+        val realStream = MediaStream(0L)
+        realStream.audioTracks.add(liveTrack)
+
+        injectPublishedStream("live-stream", realStream)
+        injectPublishedAudioTrack("live-stream", liveTrack)
+
+        val result = manager.republishLocalStream("live-stream", audio = true)
+
+        assertEquals(realStream, result)
+        verify { mockPublishPc.addTrack(liveTrack, listOf("live-stream")) }
+        verify(exactly = 0) { mockFactory.createAudioTrack(any(), any()) }
+    }
+
+    @Test
+    fun `republishLocalStream re-acquires a track that ended while disconnected`() {
+        manager.setupPublishingPeerConnection()
+
+        val endedTrack = mockk<AudioTrack>(relaxed = true)
+        every { endedTrack.state() } returns MediaStreamTrack.State.ENDED
+        every { endedTrack.id() } returns "ended-track"
+        val realStream = MediaStream(0L)
+        realStream.audioTracks.add(endedTrack)
+
+        injectPublishedStream("dead-stream", realStream)
+        injectPublishedAudioTrack("dead-stream", endedTrack)
+        every { mockPublishPc.senders } returns emptyList()
+
+        val freshStream = mockk<MediaStream>(relaxed = true)
+        val freshSource = mockk<AudioSource>(relaxed = true)
+        val freshTrack = mockk<AudioTrack>(relaxed = true)
+        every { mockFactory.createLocalMediaStream(any()) } returns freshStream
+        every { mockFactory.createAudioSource(any()) } returns freshSource
+        every { mockFactory.createAudioTrack(any(), freshSource) } returns freshTrack
+
+        val result = manager.republishLocalStream("dead-stream", audio = true)
+
+        // A re-attached ended track produces a sender that never sends RTP, so it must be replaced.
+        assertEquals(freshStream, result)
+        verify { endedTrack.dispose() }
+        verify { mockPublishPc.addTrack(freshTrack, any()) }
+        verify(exactly = 0) { mockPublishPc.addTrack(endedTrack, any()) }
+    }
+
+    @Test
+    fun `republishLocalStream acquires new tracks when nothing was retained`() {
+        manager.setupPublishingPeerConnection()
+
+        val freshStream = mockk<MediaStream>(relaxed = true)
+        every { mockFactory.createLocalMediaStream(any()) } returns freshStream
+
+        val result = manager.republishLocalStream("unknown-stream", audio = false)
+
+        assertEquals(freshStream, result)
+    }
+
+    // -------------------------------------------------------------------------
+    // cleanup() vs. concurrent access
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `cleanup disposes native objects only once when called twice`() {
+        manager.setupPublishingPeerConnection()
+        manager.setupSubscribingPeerConnection()
+
+        // disconnect() and a gateway-initiated close can both reach cleanup(); disposing the same
+        // native object twice is a JNI double free, not a harmless no-op.
+        manager.cleanup()
+        manager.cleanup()
+
+        verify(exactly = 1) { mockPublishPc.dispose() }
+        verify(exactly = 1) { mockSubscribePc.dispose() }
+        verify(exactly = 1) { mockFactory.dispose() }
+    }
+
+    @Test
+    fun `application entry points stop touching peer connections after cleanup`() {
+        manager.setupPublishingPeerConnection()
+        manager.setupSubscribingPeerConnection()
+        manager.cleanup()
+
+        // An application polling stats or sending DTMF does not know the session just died, so
+        // these must degrade to no-ops rather than dereference freed peer connections.
+        var snapshot: CallStatsSnapshot? = null
+        manager.getCallStats(0, 0, 0.0) { snapshot = it }
+        manager.sendDtmf("5")
+        manager.removeLocalTracks("any-stream")
+
+        assertNotNull(snapshot)
+        verify(exactly = 0) { mockPublishPc.getStats(any()) }
+        verify(exactly = 0) { mockSubscribePc.getStats(any()) }
+    }
+
+    @Test
+    fun `cleanup waits for an in-flight native call before disposing`() {
+        manager.setupPublishingPeerConnection()
+
+        val order = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val inFlight = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+
+        val mockTrack = mockk<MediaStreamTrack>(relaxed = true)
+        val mockDtmf = mockk<DtmfSender>(relaxed = true)
+        val mockSender = mockk<RtpSender>(relaxed = true)
+        every { mockTrack.kind() } returns "audio"
+        every { mockSender.track() } returns mockTrack
+        every { mockSender.dtmf() } returns mockDtmf
+        every { mockDtmf.canInsertDtmf() } returns true
+        every { mockPublishPc.senders } returns listOf(mockSender)
+        every { mockDtmf.insertDtmf(any(), any(), any()) } answers {
+            order.add("dtmf-start")
+            inFlight.countDown()
+            release.await()
+            order.add("dtmf-end")
+            true
+        }
+        every { mockFactory.dispose() } answers { order.add("dispose") }
+
+        val dtmfThread = Thread { manager.sendDtmf("7") }.apply { start() }
+        inFlight.await()
+        val cleanupThread = Thread { manager.cleanup() }.apply { start() }
+
+        // cleanup() must still be blocked draining: an undrained one would be finished by now,
+        // microseconds after it started. The 2s drain timeout leaves ample room for this wait.
+        cleanupThread.join(300)
+        assertTrue("cleanup() disposed while a native call was in flight", cleanupThread.isAlive)
+
+        release.countDown()
+        dtmfThread.join()
+        cleanupThread.join()
+
+        // Disposing the factory out from under a call that is already inside WebRTC is the crash
+        // this guard exists to prevent, so the ordering is the whole point.
+        assertEquals(listOf("dtmf-start", "dtmf-end", "dispose"), order.toList())
+    }
+
+    @Test
+    fun `subscribe negotiation stops short when cleanup lands mid-suspension`() = runTest {
+        manager.setupPublishingPeerConnection()
+        manager.setupSubscribingPeerConnection()
+
+        val observer = slot<SdpObserver>()
+        every { mockSubscribePc.setRemoteDescription(capture(observer), any()) } just Runs
+        // Resumes immediately so the negotiation terminates either way: if the guard ever
+        // regresses, this test has to fail rather than hang on a suspension that never resumes
+        // (a non-cancellable one cannot be unstuck, in a test or in production).
+        every { mockSubscribePc.createAnswer(any(), any()) } answers {
+            firstArg<SdpObserver>().onCreateFailure("createAnswer should not have been reached")
+        }
+
+        var error: Throwable? = null
+        val job = launch {
+            error = runCatching {
+                manager.handleSubscribeSdpOffer("offer", sdpRevision = 1, metadata = null)
+            }.exceptionOrNull()
+        }
+        runCurrent()
+
+        // The "sdpOffer" signaling handler launches an untracked coroutine, so a gateway close can
+        // dispose the subscribing PC while a renegotiation sits here, suspended on WebRTC's
+        // callback - the entry check passed long before disposal happened.
+        manager.cleanup()
+        observer.captured.onSetSuccess()
+        job.join()
+
+        verify(exactly = 0) { mockSubscribePc.createAnswer(any(), any()) }
+        assertTrue("expected SdpNegotiationFailed, got $error", error is BandwidthRTCError.SdpNegotiationFailed)
+    }
+
+    @Test(expected = BandwidthRTCError.PublishFailed::class)
+    fun `createPublishOffer fails fast after cleanup`() = runTest {
+        manager.setupPublishingPeerConnection()
+        manager.cleanup()
+
+        manager.createPublishOffer()
+    }
+
     private fun buildRealSdp(description: String): SessionDescription =
         SessionDescription(SessionDescription.Type.ANSWER, description)
 
@@ -776,6 +938,13 @@ class PeerConnectionManagerTest {
         val field = PeerConnectionManager::class.java.getDeclaredField("publishedAudioSources")
         field.isAccessible = true
         (field.get(manager) as java.util.concurrent.ConcurrentHashMap<String, AudioSource>)[streamId] = source
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun injectPublishedAudioTrack(streamId: String, track: AudioTrack) {
+        val field = PeerConnectionManager::class.java.getDeclaredField("publishedAudioTracks")
+        field.isAccessible = true
+        (field.get(manager) as java.util.concurrent.ConcurrentHashMap<String, AudioTrack>)[streamId] = track
     }
 
     private fun setPublishIceConnected(value: Boolean) {

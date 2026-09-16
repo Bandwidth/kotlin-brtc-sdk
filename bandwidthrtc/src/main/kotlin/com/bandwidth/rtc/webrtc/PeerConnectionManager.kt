@@ -9,10 +9,16 @@ import org.webrtc.audio.AudioDeviceModule
 import java.nio.ByteBuffer
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.coroutines.Continuation
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.coroutines.suspendCoroutine
 import org.webrtc.MediaStreamTrack
+
+private const val PUBLISH_ICE_CONNECT_TIMEOUT_MS = 10_000L
+
+/** How long [PeerConnectionManager.cleanup] waits for in-flight native calls before disposing anyway. */
+private const val NATIVE_DRAIN_TIMEOUT_MS = 2_000L
 
 class PeerConnectionManager(
     private val context: Context,
@@ -39,6 +45,7 @@ class PeerConnectionManager(
 
     private val publishedStreams = ConcurrentHashMap<String, MediaStream>()
     private val publishedAudioSources = ConcurrentHashMap<String, AudioSource>()
+    private val publishedAudioTracks = ConcurrentHashMap<String, AudioTrack>()
     private val subscribedTrackMetadata = ConcurrentHashMap<String, TrackMetadata>()
     var subscribeSdpRevision: Long = 0
         private set
@@ -50,6 +57,60 @@ class PeerConnectionManager(
 
     @Volatile
     private var publishIceConnected = false
+
+    // Disposal is no longer something only the application asks for: a gateway-initiated websocket
+    // close tears the session down mid-call, on whatever thread delivered that event, so an
+    // application call like getCallStats() or sendDtmf() can land inside the disposal window.
+    // Using a handle after dispose() is a JNI crash the application cannot catch, so every entry
+    // point that dereferences one goes through [useNative].
+    private val nativeLock = Object()
+
+    @Volatile
+    private var disposed = false
+
+    /** Number of calls currently inside [useNative], i.e. holding a live reference to a handle. */
+    private var activeNativeCalls = 0
+
+    /**
+     * Makes one SDP call with its peer connection guaranteed alive, failing the negotiation if the
+     * manager has already been cleaned up.
+     *
+     * Only the calls issued from our own coroutine's thread need this. The nested
+     * setLocalDescription() calls do not: they run inside a WebRTC observer callback on the
+     * signaling thread, and dispose() blocks on that same thread, so WebRTC itself serializes them
+     * against teardown.
+     */
+    private fun <T> Continuation<T>.withLiveNative(block: () -> Unit) {
+        useNative(block) ?: resumeWithException(
+            BandwidthRTCError.SdpNegotiationFailed("Peer connection manager has been cleaned up")
+        )
+    }
+
+    /**
+     * Runs [block] with the native handles guaranteed alive, or returns null if the manager has
+     * already been cleaned up.
+     *
+     * The registration count, not the lock, is what holds disposal off: [nativeLock] is held only
+     * long enough to register and deregister, never across [block]. That matters because WebRTC's
+     * proxy calls (dispose, insertDtmf, createPeerConnection) block on its signaling thread, and
+     * that same thread delivers the observer callbacks that reach application code - an
+     * application handler calling back into the SDK while a lock was held across one of those
+     * would deadlock.
+     */
+    private inline fun <T> useNative(block: () -> T): T? {
+        synchronized(nativeLock) {
+            if (disposed) return null
+            activeNativeCalls++
+        }
+        try {
+            return block()
+        } finally {
+            synchronized(nativeLock) {
+                activeNativeCalls--
+                nativeLock.notifyAll()
+            }
+        }
+    }
 
     init {
         if (!factoryInitialized) {
@@ -78,7 +139,7 @@ class PeerConnectionManager(
         return config
     }
 
-    override fun setupPublishingPeerConnection(): PeerConnection {
+    override fun setupPublishingPeerConnection(): PeerConnection = useNative {
         val config = createRtcConfiguration()
 
         val pc = factory.createPeerConnection(
@@ -88,10 +149,10 @@ class PeerConnectionManager(
 
         this.publishingPC = pc
         log.debug("Publishing peer connection created")
-        return pc
-    }
+        pc
+    } ?: throw BandwidthRTCError.ConnectionFailed("Peer connection manager has been cleaned up")
 
-    override fun setupSubscribingPeerConnection(): PeerConnection {
+    override fun setupSubscribingPeerConnection(): PeerConnection = useNative {
         val config = createRtcConfiguration()
 
         val pc = factory.createPeerConnection(
@@ -101,20 +162,42 @@ class PeerConnectionManager(
 
         this.subscribingPC = pc
         log.debug("Subscribing peer connection created")
-        return pc
-    }
+        pc
+    } ?: throw BandwidthRTCError.ConnectionFailed("Peer connection manager has been cleaned up")
 
     override suspend fun waitForPublishIceConnected() {
         if (publishIceConnected) {
             log.debug("Publish ICE already connected, skipping wait")
             return
         }
+        val deadline = System.currentTimeMillis() + PUBLISH_ICE_CONNECT_TIMEOUT_MS
         while (!publishIceConnected) {
+            if (disposed) {
+                throw BandwidthRTCError.PublishFailed("Peer connection manager was cleaned up while waiting for publish ICE")
+            }
+            if (System.currentTimeMillis() >= deadline) {
+                throw BandwidthRTCError.PublishFailed(
+                    "Publish peer connection did not reach connected within ${PUBLISH_ICE_CONNECT_TIMEOUT_MS}ms"
+                )
+            }
             delay(50)
         }
     }
 
+    /**
+     * The SDP negotiation methods below suspend on WebRTC's own observer callbacks, so they cannot
+     * register with [useNative] for the whole call the way the synchronous entry points do - that
+     * would hold disposal off across a suspension of unbounded length. Each individual native call
+     * is registered instead, via [withLiveNative]: the calls themselves are synchronous, so a
+     * teardown landing during a suspension is caught by the next one rather than crashing in it.
+     *
+     * The entry checks on [disposed] are only a fast path. They are not the guarantee, because the
+     * session coroutine driving a negotiation is not always cancelled by a teardown - the
+     * "sdpOffer" signaling event handler launches an untracked coroutine, so a renegotiation
+     * arriving as the socket closes can be mid-suspension when cleanup() runs.
+     */
     override suspend fun answerInitialOffer(sdpOffer: String, pcType: PeerConnectionType): String {
+        if (disposed) throw BandwidthRTCError.SdpNegotiationFailed("Peer connection manager has been cleaned up")
         val pc = when (pcType) {
             PeerConnectionType.PUBLISH -> publishingPC
             PeerConnectionType.SUBSCRIBE -> subscribingPC
@@ -123,47 +206,62 @@ class PeerConnectionManager(
         val offer = SessionDescription(SessionDescription.Type.OFFER, sdpOffer)
 
         suspendCoroutine { continuation ->
-            pc.setRemoteDescription(object : SdpObserver {
-                override fun onSetSuccess() = continuation.resume(Unit)
-                override fun onSetFailure(error: String?) =
-                    continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "setRemoteDescription failed"))
-                override fun onCreateSuccess(sdp: SessionDescription?) {}
-                override fun onCreateFailure(error: String?) {}
-            }, offer)
+            continuation.withLiveNative {
+                pc.setRemoteDescription(object : SdpObserver {
+                    override fun onSetSuccess() = continuation.resume(Unit)
+                    override fun onSetFailure(error: String?) =
+                        continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "setRemoteDescription failed"))
+                    override fun onCreateSuccess(sdp: SessionDescription?) {}
+                    override fun onCreateFailure(error: String?) {}
+                }, offer)
+            }
         }
 
         val answerConstraints = MediaConstraints()
         val answerSdp = suspendCoroutine { continuation ->
-            pc.createAnswer(object : SdpObserver {
-                override fun onCreateSuccess(sdp: SessionDescription?) {
-                    if (sdp == null) {
-                        continuation.resumeWithException(
-                            BandwidthRTCError.SdpNegotiationFailed("No SDP answer generated")
-                        )
-                        return
+            continuation.withLiveNative {
+                pc.createAnswer(object : SdpObserver {
+                    override fun onCreateSuccess(sdp: SessionDescription?) {
+                        if (sdp == null) {
+                            continuation.resumeWithException(
+                                BandwidthRTCError.SdpNegotiationFailed("No SDP answer generated")
+                            )
+                            return
+                        }
+                        pc.setLocalDescription(object : SdpObserver {
+                            override fun onSetSuccess() = continuation.resume(sdp.description)
+                            override fun onSetFailure(error: String?) =
+                                continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "setLocalDescription failed"))
+                            override fun onCreateSuccess(sdp: SessionDescription?) {}
+                            override fun onCreateFailure(error: String?) {}
+                        }, sdp)
                     }
-                    pc.setLocalDescription(object : SdpObserver {
-                        override fun onSetSuccess() = continuation.resume(sdp.description)
-                        override fun onSetFailure(error: String?) =
-                            continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "setLocalDescription failed"))
-                        override fun onCreateSuccess(sdp: SessionDescription?) {}
-                        override fun onCreateFailure(error: String?) {}
-                    }, sdp)
-                }
-                override fun onCreateFailure(error: String?) =
-                    continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "createAnswer failed"))
-                override fun onSetSuccess() {}
-                override fun onSetFailure(error: String?) {}
-            }, answerConstraints)
+                    override fun onCreateFailure(error: String?) =
+                        continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "createAnswer failed"))
+                    override fun onSetSuccess() {}
+                    override fun onSetFailure(error: String?) {}
+                }, answerConstraints)
+            }
         }
 
         return answerSdp
     }
 
-    override fun addLocalTracks(audio: Boolean): MediaStream {
+    override fun addLocalTracks(audio: Boolean): MediaStream =
+        useNative { createLocalStream(audio = audio, streamId = UUID.randomUUID().toString()) }
+            ?: throw BandwidthRTCError.PublishFailed("Peer connection manager has been cleaned up")
+
+    /**
+     * Build a local stream under a caller-chosen id.
+     *
+     * Re-acquiring after a reconnect reuses the previous stream id so the RtcStream handle the
+     * application is already holding keeps working: unpublish() matches on stream id, as does any
+     * application state keyed by it. The JavaScript and Swift SDKs keep the same stream object
+     * across a reconnect, so preserving the id here keeps all three consistent.
+     */
+    private fun createLocalStream(audio: Boolean, streamId: String): MediaStream {
         val pc = publishingPC ?: throw BandwidthRTCError.PublishFailed("Publishing peer connection not set up")
 
-        val streamId = UUID.randomUUID().toString()
         val stream = factory.createLocalMediaStream(streamId)
 
         if (audio) {
@@ -177,6 +275,7 @@ class PeerConnectionManager(
             val audioSource = factory.createAudioSource(audioConstraints)
             publishedAudioSources[streamId] = audioSource
             val audioTrack = factory.createAudioTrack("audio-$streamId", audioSource)
+            publishedAudioTracks[streamId] = audioTrack
             stream.addTrack(audioTrack)
             pc.addTrack(audioTrack, listOf(streamId))
             log.debug("Added audio track to publishing PC")
@@ -188,7 +287,35 @@ class PeerConnectionManager(
         return stream
     }
 
+    /**
+     * Re-attach a previously published stream to the current publishing peer connection.
+     *
+     * A track that ended while the session was down produces a sender that never sends RTP, which
+     * leaves the endpoint ineligible on the platform even though the SDP looks correct, so anything
+     * that is not still live is re-acquired from scratch instead of being re-attached dead.
+     *
+     * The caller is responsible for renegotiating once all streams have been re-attached.
+     */
+    override fun republishLocalStream(streamId: String, audio: Boolean): MediaStream = useNative {
+        val pc = publishingPC ?: throw BandwidthRTCError.PublishFailed("Publishing peer connection not set up")
+
+        val stream = publishedStreams[streamId]
+        val track = publishedAudioTracks[streamId]
+        val live = stream != null && (!audio || track?.state() == MediaStreamTrack.State.LIVE)
+
+        if (!live) {
+            log.info("Re-acquiring local tracks for stream $streamId (previous tracks are gone)")
+            removeLocalTracks(streamId)
+            return@useNative createLocalStream(audio = audio, streamId = streamId)
+        }
+
+        track?.let { pc.addTrack(it, listOf(streamId)) }
+        log.debug("Re-attached live local tracks for stream $streamId")
+        stream!!
+    } ?: throw BandwidthRTCError.PublishFailed("Peer connection manager has been cleaned up")
+
     override suspend fun createPublishOffer(): String {
+        if (disposed) throw BandwidthRTCError.PublishFailed("Peer connection manager has been cleaned up")
         val pc = publishingPC
             ?: throw BandwidthRTCError.PublishFailed("Publishing peer connection not available")
 
@@ -198,27 +325,29 @@ class PeerConnectionManager(
         }
 
         val offerSdp = suspendCoroutine { continuation ->
-            pc.createOffer(object : SdpObserver {
-                override fun onCreateSuccess(sdp: SessionDescription?) {
-                    if (sdp == null) {
-                        continuation.resumeWithException(
-                            BandwidthRTCError.SdpNegotiationFailed("No SDP offer generated")
-                        )
-                        return
+            continuation.withLiveNative {
+                pc.createOffer(object : SdpObserver {
+                    override fun onCreateSuccess(sdp: SessionDescription?) {
+                        if (sdp == null) {
+                            continuation.resumeWithException(
+                                BandwidthRTCError.SdpNegotiationFailed("No SDP offer generated")
+                            )
+                            return
+                        }
+                        pc.setLocalDescription(object : SdpObserver {
+                            override fun onSetSuccess() = continuation.resume(sdp.description)
+                            override fun onSetFailure(error: String?) =
+                                continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "setLocalDescription failed"))
+                            override fun onCreateSuccess(sdp: SessionDescription?) {}
+                            override fun onCreateFailure(error: String?) {}
+                        }, sdp)
                     }
-                    pc.setLocalDescription(object : SdpObserver {
-                        override fun onSetSuccess() = continuation.resume(sdp.description)
-                        override fun onSetFailure(error: String?) =
-                            continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "setLocalDescription failed"))
-                        override fun onCreateSuccess(sdp: SessionDescription?) {}
-                        override fun onCreateFailure(error: String?) {}
-                    }, sdp)
-                }
-                override fun onCreateFailure(error: String?) =
-                    continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "createOffer failed"))
-                override fun onSetSuccess() {}
-                override fun onSetFailure(error: String?) {}
-            }, offerConstraints)
+                    override fun onCreateFailure(error: String?) =
+                        continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "createOffer failed"))
+                    override fun onSetSuccess() {}
+                    override fun onSetFailure(error: String?) {}
+                }, offerConstraints)
+            }
         }
 
         log.debug("Publish SDP offer created")
@@ -226,19 +355,22 @@ class PeerConnectionManager(
     }
 
     override suspend fun applyPublishAnswer(remoteAnswer: String) {
+        if (disposed) throw BandwidthRTCError.PublishFailed("Peer connection manager has been cleaned up")
         val pc = publishingPC
             ?: throw BandwidthRTCError.PublishFailed("Publishing peer connection not available")
 
         val answer = SessionDescription(SessionDescription.Type.ANSWER, remoteAnswer)
 
         suspendCoroutine { continuation ->
-            pc.setRemoteDescription(object : SdpObserver {
-                override fun onSetSuccess() = continuation.resume(Unit)
-                override fun onSetFailure(error: String?) =
-                    continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "setRemoteDescription failed"))
-                override fun onCreateSuccess(sdp: SessionDescription?) {}
-                override fun onCreateFailure(error: String?) {}
-            }, answer)
+            continuation.withLiveNative {
+                pc.setRemoteDescription(object : SdpObserver {
+                    override fun onSetSuccess() = continuation.resume(Unit)
+                    override fun onSetFailure(error: String?) =
+                        continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "setRemoteDescription failed"))
+                    override fun onCreateSuccess(sdp: SessionDescription?) {}
+                    override fun onCreateFailure(error: String?) {}
+                }, answer)
+            }
         }
 
         log.debug("Publish SDP answer applied")
@@ -249,6 +381,7 @@ class PeerConnectionManager(
         sdpRevision: Long?,
         metadata: Map<String, TrackMetadata>?
     ): String {
+        if (disposed) throw BandwidthRTCError.SdpNegotiationFailed("Peer connection manager has been cleaned up")
         val effectiveRevision = sdpRevision ?: (subscribeSdpRevision + 1)
 
         if (effectiveRevision <= subscribeSdpRevision && subscribeSdpRevision != 0L) {
@@ -271,55 +404,59 @@ class PeerConnectionManager(
 
         log.debug("[subscribe] setRemoteDescription...")
         suspendCoroutine { continuation ->
-            pc.setRemoteDescription(object : SdpObserver {
-                override fun onSetSuccess() {
-                    log.debug("[subscribe] setRemoteDescription SUCCESS")
-                    continuation.resume(Unit)
-                }
-                override fun onSetFailure(error: String?) {
-                    log.error("[subscribe] setRemoteDescription FAILED: $error")
-                    continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "setRemoteDescription failed"))
-                }
-                override fun onCreateSuccess(sdp: SessionDescription?) {}
-                override fun onCreateFailure(error: String?) {}
-            }, offer)
+            continuation.withLiveNative {
+                pc.setRemoteDescription(object : SdpObserver {
+                    override fun onSetSuccess() {
+                        log.debug("[subscribe] setRemoteDescription SUCCESS")
+                        continuation.resume(Unit)
+                    }
+                    override fun onSetFailure(error: String?) {
+                        log.error("[subscribe] setRemoteDescription FAILED: $error")
+                        continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "setRemoteDescription failed"))
+                    }
+                    override fun onCreateSuccess(sdp: SessionDescription?) {}
+                    override fun onCreateFailure(error: String?) {}
+                }, offer)
+            }
         }
 
         log.debug("[subscribe] createAnswer...")
         val answerConstraints = MediaConstraints()
 
         val answerSdp = suspendCoroutine { continuation ->
-            pc.createAnswer(object : SdpObserver {
-                override fun onCreateSuccess(sdp: SessionDescription?) {
-                    if (sdp == null) {
-                        log.error("[subscribe] createAnswer returned null")
-                        continuation.resumeWithException(
-                            BandwidthRTCError.SdpNegotiationFailed("No SDP answer generated")
-                        )
-                        return
-                    }
+            continuation.withLiveNative {
+                pc.createAnswer(object : SdpObserver {
+                    override fun onCreateSuccess(sdp: SessionDescription?) {
+                        if (sdp == null) {
+                            log.error("[subscribe] createAnswer returned null")
+                            continuation.resumeWithException(
+                                BandwidthRTCError.SdpNegotiationFailed("No SDP answer generated")
+                            )
+                            return
+                        }
 
-                    log.debug("[subscribe] setLocalDescription...")
-                    pc.setLocalDescription(object : SdpObserver {
-                        override fun onSetSuccess() {
-                            log.debug("[subscribe] setLocalDescription SUCCESS")
-                            continuation.resume(sdp.description)
-                        }
-                        override fun onSetFailure(error: String?) {
-                            log.error("[subscribe] setLocalDescription FAILED: $error")
-                            continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "setLocalDescription failed"))
-                        }
-                        override fun onCreateSuccess(sdp: SessionDescription?) {}
-                        override fun onCreateFailure(error: String?) {}
-                    }, sdp)
-                }
-                override fun onCreateFailure(error: String?) {
-                    log.error("[subscribe] createAnswer FAILED: $error")
-                    continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "createAnswer failed"))
-                }
-                override fun onSetSuccess() {}
-                override fun onSetFailure(error: String?) {}
-            }, answerConstraints)
+                        log.debug("[subscribe] setLocalDescription...")
+                        pc.setLocalDescription(object : SdpObserver {
+                            override fun onSetSuccess() {
+                                log.debug("[subscribe] setLocalDescription SUCCESS")
+                                continuation.resume(sdp.description)
+                            }
+                            override fun onSetFailure(error: String?) {
+                                log.error("[subscribe] setLocalDescription FAILED: $error")
+                                continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "setLocalDescription failed"))
+                            }
+                            override fun onCreateSuccess(sdp: SessionDescription?) {}
+                            override fun onCreateFailure(error: String?) {}
+                        }, sdp)
+                    }
+                    override fun onCreateFailure(error: String?) {
+                        log.error("[subscribe] createAnswer FAILED: $error")
+                        continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "createAnswer failed"))
+                    }
+                    override fun onSetSuccess() {}
+                    override fun onSetFailure(error: String?) {}
+                }, answerConstraints)
+            }
         }
 
         subscribeSdpRevision = effectiveRevision
@@ -328,68 +465,65 @@ class PeerConnectionManager(
     }
 
     override fun removeLocalTracks(streamId: String) {
-        val pc = publishingPC ?: return
-        val stream = publishedStreams[streamId]
-        if (stream == null) {
-            log.warn("removeLocalTracks: stream $streamId not found")
-            return
-        }
-
-        for (track in stream.audioTracks) {
-            val matchingSenders = pc.senders.filter { it.track()?.id() == track.id() }
-            for (sender in matchingSenders) {
-                pc.removeTrack(sender)
-                log.debug("Removed sender for track ${track.id()}")
+        useNative {
+            val pc = publishingPC ?: return@useNative
+            val stream = publishedStreams[streamId]
+            if (stream == null) {
+                log.warn("removeLocalTracks: stream $streamId not found")
+                return@useNative
             }
-            track.setEnabled(false)
-            track.dispose()
-        }
 
-        publishedAudioSources.remove(streamId)?.dispose()
-        publishedStreams.remove(streamId)
-        log.debug("Removed local tracks for stream $streamId")
-    }
-
-    override fun setAudioEnabled(enabled: Boolean) {
-        for ((_, stream) in publishedStreams) {
             for (track in stream.audioTracks) {
-                track.setEnabled(enabled)
+                val matchingSenders = pc.senders.filter { it.track()?.id() == track.id() }
+                for (sender in matchingSenders) {
+                    pc.removeTrack(sender)
+                    log.debug("Removed sender for track ${track.id()}")
+                }
+                track.setEnabled(false)
+                track.dispose()
             }
+
+            publishedAudioSources.remove(streamId)?.dispose()
+            publishedAudioTracks.remove(streamId)
+            publishedStreams.remove(streamId)
+            log.debug("Removed local tracks for stream $streamId")
         }
     }
 
     override fun sendDtmf(tone: String, duration: Int, interToneGap: Int) {
-        val pc = publishingPC ?: return
+        useNative {
+            val pc = publishingPC ?: return@useNative
 
-        for (sender in pc.senders) {
-            val track = sender.track()
-            if (track?.kind() == "audio") {
-                val dtmfSender = sender.dtmf() ?: continue
-                if (!dtmfSender.canInsertDtmf()) {
-                    log.warn("DTMF sender not ready — tone dropped: $tone")
-                    continue
-                }
-                if (dtmfSender.insertDtmf(tone, duration, interToneGap)) {
-                    log.debug("Sent DTMF: $tone")
-                    val streamId = publishedStreams.entries.find { (_, stream) ->
-                        stream.audioTracks.any { it.id() == track.id() }
-                    }?.key
-                    // insertDtmf is fire-and-forget with no completion signal from WebRTC, so this
-                    // reports tones as queued rather than as actually played.
-                    if (streamId != null) {
-                        for (character in tone) {
-                            if (VALID_DTMF_TONES.contains(character)) {
-                                onDtmfSent?.invoke(DtmfSentEvent(tone = character.toString(), streamId = streamId))
+            for (sender in pc.senders) {
+                val track = sender.track()
+                if (track?.kind() == "audio") {
+                    val dtmfSender = sender.dtmf() ?: continue
+                    if (!dtmfSender.canInsertDtmf()) {
+                        log.warn("DTMF sender not ready — tone dropped: $tone")
+                        continue
+                    }
+                    if (dtmfSender.insertDtmf(tone, duration, interToneGap)) {
+                        log.debug("Sent DTMF: $tone")
+                        val streamId = publishedStreams.entries.find { (_, stream) ->
+                            stream.audioTracks.any { it.id() == track.id() }
+                        }?.key
+                        // insertDtmf is fire-and-forget with no completion signal from WebRTC, so this
+                        // reports tones as queued rather than as actually played.
+                        if (streamId != null) {
+                            for (character in tone) {
+                                if (VALID_DTMF_TONES.contains(character)) {
+                                    onDtmfSent?.invoke(DtmfSentEvent(tone = character.toString(), streamId = streamId))
+                                }
                             }
                         }
+                    } else {
+                        log.warn("insertDtmf failed for tone: $tone")
                     }
-                } else {
-                    log.warn("insertDtmf failed for tone: $tone")
+                    return@useNative
                 }
-                return
             }
+            log.warn("No audio sender found for DTMF")
         }
-        log.warn("No audio sender found for DTMF")
     }
 
     override fun getCallStats(
@@ -419,60 +553,67 @@ class PeerConnectionManager(
             }
         }
 
-        val subPC = subscribingPC
-        if (subPC != null) {
-            synchronized(lock) { pendingCount++ }
-            subPC.getStats(RTCStatsCollectorCallback { report ->
-                var codecId: String? = null
-                for ((_, stat) in report.statsMap) {
-                    if (stat.type == "inbound-rtp") {
-                        val kind = stat.members["kind"] as? String
-                        if (kind == "audio") {
-                            snapshot.packetsReceived = (stat.members["packetsReceived"] as? Number)?.toInt() ?: 0
-                            snapshot.packetsLost = (stat.members["packetsLost"] as? Number)?.toInt() ?: 0
-                            snapshot.bytesReceived = (stat.members["bytesReceived"] as? Number)?.toInt() ?: 0
-                            snapshot.jitter = (stat.members["jitter"] as? Number)?.toDouble() ?: 0.0
-                            snapshot.audioLevel = (stat.members["audioLevel"] as? Number)?.toDouble() ?: 0.0
-                            codecId = stat.members["codecId"] as? String
+        // Only the two getStats() calls dereference a peer connection; the collector callbacks
+        // below read the report they are handed, which is plain Java data, so they stay safe even
+        // if a teardown lands while they are in flight. Registering the launches is enough.
+        useNative {
+            val subPC = subscribingPC
+            if (subPC != null) {
+                synchronized(lock) { pendingCount++ }
+                subPC.getStats(RTCStatsCollectorCallback { report ->
+                    var codecId: String? = null
+                    for ((_, stat) in report.statsMap) {
+                        if (stat.type == "inbound-rtp") {
+                            val kind = stat.members["kind"] as? String
+                            if (kind == "audio") {
+                                snapshot.packetsReceived = (stat.members["packetsReceived"] as? Number)?.toInt() ?: 0
+                                snapshot.packetsLost = (stat.members["packetsLost"] as? Number)?.toInt() ?: 0
+                                snapshot.bytesReceived = (stat.members["bytesReceived"] as? Number)?.toInt() ?: 0
+                                snapshot.jitter = (stat.members["jitter"] as? Number)?.toDouble() ?: 0.0
+                                snapshot.audioLevel = (stat.members["audioLevel"] as? Number)?.toDouble() ?: 0.0
+                                codecId = stat.members["codecId"] as? String
+                            }
+                        }
+                        if (stat.type == "candidate-pair") {
+                            val state = stat.members["state"] as? String
+                            if (state == "succeeded") {
+                                snapshot.roundTripTime = (stat.members["currentRoundTripTime"] as? Number)?.toDouble() ?: 0.0
+                            }
                         }
                     }
-                    if (stat.type == "candidate-pair") {
-                        val state = stat.members["state"] as? String
-                        if (state == "succeeded") {
-                            snapshot.roundTripTime = (stat.members["currentRoundTripTime"] as? Number)?.toDouble() ?: 0.0
+                    if (codecId != null) {
+                        val codecStat = report.statsMap[codecId]
+                        if (codecStat != null) {
+                            val mimeType = codecStat.members["mimeType"] as? String
+                            if (mimeType != null) {
+                                snapshot.codec = mimeType.removePrefix("audio/")
+                            }
                         }
                     }
-                }
-                if (codecId != null) {
-                    val codecStat = report.statsMap[codecId]
-                    if (codecStat != null) {
-                        val mimeType = codecStat.members["mimeType"] as? String
-                        if (mimeType != null) {
-                            snapshot.codec = mimeType.removePrefix("audio/")
+                    checkDone()
+                })
+            }
+
+            val pubPC = publishingPC
+            if (pubPC != null) {
+                synchronized(lock) { pendingCount++ }
+                pubPC.getStats(RTCStatsCollectorCallback { report ->
+                    for ((_, stat) in report.statsMap) {
+                        if (stat.type == "outbound-rtp") {
+                            val kind = stat.members["kind"] as? String
+                            if (kind == "audio") {
+                                snapshot.packetsSent = (stat.members["packetsSent"] as? Number)?.toInt() ?: 0
+                                snapshot.bytesSent = (stat.members["bytesSent"] as? Number)?.toInt() ?: 0
+                            }
                         }
                     }
-                }
-                checkDone()
-            })
+                    checkDone()
+                })
+            }
         }
 
-        val pubPC = publishingPC
-        if (pubPC != null) {
-            synchronized(lock) { pendingCount++ }
-            pubPC.getStats(RTCStatsCollectorCallback { report ->
-                for ((_, stat) in report.statsMap) {
-                    if (stat.type == "outbound-rtp") {
-                        val kind = stat.members["kind"] as? String
-                        if (kind == "audio") {
-                            snapshot.packetsSent = (stat.members["packetsSent"] as? Number)?.toInt() ?: 0
-                            snapshot.bytesSent = (stat.members["bytesSent"] as? Number)?.toInt() ?: 0
-                        }
-                    }
-                }
-                checkDone()
-            })
-        }
-
+        // Outside useNative: nothing left to dereference, and completion() is application code -
+        // running it while registered would hold disposal off for as long as the application takes.
         synchronized(lock) {
             if (pendingCount == 0) {
                 completion(snapshot)
@@ -481,6 +622,32 @@ class PeerConnectionManager(
     }
 
     override fun cleanup() {
+        synchronized(nativeLock) {
+            if (disposed) {
+                log.debug("cleanup() ignored - peer connection manager is already cleaned up")
+                return
+            }
+            // Flipping this first is what makes the rest safe: every later caller bails out of
+            // useNative() instead of reaching for a handle this call is about to free.
+            disposed = true
+
+            // Wait for calls that registered before the flag flipped. wait() releases the lock,
+            // so they can deregister. Disposing anyway after the timeout is the deliberate
+            // ceiling - a native call wedged for two seconds is already broken, and blocking
+            // teardown on it forever is worse than the crash risk of proceeding.
+            val deadline = System.currentTimeMillis() + NATIVE_DRAIN_TIMEOUT_MS
+            while (activeNativeCalls > 0) {
+                val remaining = deadline - System.currentTimeMillis()
+                if (remaining <= 0) {
+                    log.warn("Disposing with $activeNativeCalls native call(s) still in flight")
+                    break
+                }
+                nativeLock.wait(remaining)
+            }
+        }
+
+        // Everything below runs with no lock held - see [useNative].
+
         // 1. Remove senders from PCs before disposing tracks
         publishingPC?.let { pc ->
             for (sender in pc.senders) {
@@ -498,6 +665,7 @@ class PeerConnectionManager(
         }
         publishedStreams.clear()
         publishedAudioSources.clear()
+        publishedAudioTracks.clear()
 
         // 3. Close data channels
         listOfNotNull(publishHeartbeatDC, publishDiagnosticsDC, subscribeHeartbeatDC, subscribeDiagnosticsDC)

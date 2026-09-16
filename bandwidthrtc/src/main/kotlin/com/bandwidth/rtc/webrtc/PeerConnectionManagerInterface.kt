@@ -20,6 +20,7 @@ interface PeerConnectionManagerInterface {
     suspend fun waitForPublishIceConnected()
     suspend fun answerInitialOffer(sdpOffer: String, pcType: PeerConnectionType): String
     fun addLocalTracks(audio: Boolean): MediaStream
+    fun republishLocalStream(streamId: String, audio: Boolean): MediaStream
     fun removeLocalTracks(streamId: String)
     suspend fun createPublishOffer(): String
     suspend fun applyPublishAnswer(remoteAnswer: String)
@@ -29,7 +30,6 @@ interface PeerConnectionManagerInterface {
         metadata: Map<String, TrackMetadata>?
     ): String
 
-    fun setAudioEnabled(enabled: Boolean)
     fun sendDtmf(tone: String, duration: Int = 100, interToneGap: Int = 50)
     fun cleanup()
     fun getCallStats(

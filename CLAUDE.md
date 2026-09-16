@@ -95,6 +95,7 @@ BandwidthRTC (public API)
 | `onRemoteDisconnected` | `(() -> Unit)?` | Subscribe ICE disconnected or failed |
 | `onLocalAudioLevel` | `((FloatArray) -> Unit)?` | PCM level samples from mic |
 | `onRemoteAudioLevel` | `((FloatArray) -> Unit)?` | PCM level samples from remote audio |
+| `onError` | `((Throwable) -> Unit)?` | Session failed unrecoverably (reconnect exhausted or republish failed) |
 | `isConnected` | `Boolean` | Current session state |
 | `connect(authParams, options?)` | `suspend` | Opens WebSocket + sets up dual PCs |
 | `disconnect()` | `suspend` | Tears down everything |

@@ -81,6 +81,12 @@ internal class SignalingClient(
 
                 override fun onClosing(code: Int, reason: String) {
                     log.info("WebSocket closing: code=$code, reason=$reason")
+                    // The remote peer (the gateway, e.g. evicting this endpoint during a deploy
+                    // drain) has sent a close frame and is waiting for us to reciprocate before
+                    // completing the closing handshake. Without this, OkHttp holds the
+                    // connection half-open indefinitely - onClosed() never fires, so
+                    // handleDisconnect() (and the reconnect loop it drives) never runs.
+                    ws.close(code, reason)
                 }
 
                 override fun onClosed(code: Int, reason: String) {
@@ -88,12 +94,10 @@ internal class SignalingClient(
                     handleDisconnect()
                 }
 
-                override fun onFailure(throwable: Throwable) {
-                    log.error("WebSocket failure: ${throwable.message}")
+                override fun onFailure(throwable: Throwable, httpStatusCode: Int?) {
+                    log.error("WebSocket failure: ${throwable.message} (httpStatus=$httpStatusCode)")
                     if (!isConnected) {
-                        continuation.resumeWithException(
-                            BandwidthRTCError.ConnectionFailed(throwable.message ?: "Unknown error")
-                        )
+                        continuation.resumeWithException(handshakeError(throwable, httpStatusCode))
                     } else {
                         handleDisconnect()
                     }
@@ -296,6 +300,16 @@ internal class SignalingClient(
         } else {
             log.warn("No handler registered for notification: $method")
         }
+    }
+
+    /**
+     * Maps a rejected websocket upgrade to an error. 403 means the token is bad and 409 means the
+     * gateway still has a device marked connected for this endpoint; neither resolves on a retry.
+     */
+    private fun handshakeError(throwable: Throwable, httpStatusCode: Int?): BandwidthRTCError = when (httpStatusCode) {
+        403 -> BandwidthRTCError.InvalidToken()
+        409 -> BandwidthRTCError.RpcError(409, "Endpoint already connected")
+        else -> BandwidthRTCError.ConnectionFailed(throwable.message ?: "Unknown error")
     }
 
     private fun handleDisconnect() {
