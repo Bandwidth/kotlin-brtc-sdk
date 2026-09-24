@@ -23,6 +23,11 @@ private const val SDK_VERSION = "0.1.0"
 
 private const val PING_INTERVAL_MS = 60_000L
 
+// OkHttp's onFailure gives no close code (no close frame was ever received), so this synthesizes
+// the code browsers/rpc-websockets use for the same case, keeping this SDK's "close" event
+// consistent for callers regardless of which failure path produced it.
+private const val CLOSE_CODE_ABNORMAL = 1006
+
 internal class SignalingClient(
     private val webSocketFactory: () -> WebSocketInterface = { OkHttpWebSocket() }
 ) : SignalingClientInterface {
@@ -91,7 +96,7 @@ internal class SignalingClient(
 
                 override fun onClosed(code: Int, reason: String) {
                     log.info("WebSocket closed: code=$code, reason=$reason")
-                    handleDisconnect()
+                    handleDisconnect(code)
                 }
 
                 override fun onFailure(throwable: Throwable, httpStatusCode: Int?) {
@@ -99,7 +104,7 @@ internal class SignalingClient(
                     if (!isConnected) {
                         continuation.resumeWithException(handshakeError(throwable, httpStatusCode))
                     } else {
-                        handleDisconnect()
+                        handleDisconnect(CLOSE_CODE_ABNORMAL)
                     }
                 }
             })
@@ -312,11 +317,16 @@ internal class SignalingClient(
         else -> BandwidthRTCError.ConnectionFailed(throwable.message ?: "Unknown error")
     }
 
-    private fun handleDisconnect() {
+    /**
+     * [closeCode] is the WebSocket close code (or [CLOSE_CODE_ABNORMAL] when there was no close
+     * frame at all) - forwarded to the "close" event so callers can decide whether this is worth
+     * retrying rather than always assuming it is.
+     */
+    private fun handleDisconnect(closeCode: Int) {
         val wasConnected = isConnected
         isConnected = false
 
-        log.info("SignalingClient.handleDisconnect() wasConnected=$wasConnected")
+        log.info("SignalingClient.handleDisconnect() wasConnected=$wasConnected, closeCode=$closeCode")
 
         if (pendingRequests.isNotEmpty()) {
             log.debug("Failing ${pendingRequests.size} pending requests due to disconnect")
@@ -327,7 +337,7 @@ internal class SignalingClient(
         }
 
         if (wasConnected) {
-            eventHandlers["close"]?.invoke("")
+            eventHandlers["close"]?.invoke(closeCode.toString())
         }
     }
 

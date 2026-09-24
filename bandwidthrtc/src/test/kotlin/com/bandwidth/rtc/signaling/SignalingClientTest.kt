@@ -593,6 +593,18 @@ class SignalingClientTest {
     }
 
     @Test
+    fun `websocket closure passes the close code to the close event handler`() = runTest {
+        client.connect(authParams, defaultOptions)
+
+        var receivedCode: String? = null
+        client.onEvent("close") { data -> receivedCode = data }
+
+        capturedListener.get()?.onClosed(1001, "going away")
+
+        assertEquals("1001", receivedCode)
+    }
+
+    @Test
     fun `websocket failure after connect triggers disconnect`() = runTest {
         client.connect(authParams, defaultOptions)
         assertTrue(client.isConnected)
@@ -600,6 +612,21 @@ class SignalingClientTest {
         capturedListener.get()?.onFailure(RuntimeException("connection lost"))
 
         assertFalse(client.isConnected)
+    }
+
+    @Test
+    fun `websocket failure with no close frame synthesizes abnormal close code 1006`() = runTest {
+        // OkHttp's onFailure carries no WebSocket close code (no close frame was ever received).
+        // Synthesize 1006, the browser/rpc-websockets convention for an abnormal closure, so
+        // callers of the "close" event see a consistent code regardless of failure path.
+        client.connect(authParams, defaultOptions)
+
+        var receivedCode: String? = null
+        client.onEvent("close") { data -> receivedCode = data }
+
+        capturedListener.get()?.onFailure(RuntimeException("connection lost"))
+
+        assertEquals("1006", receivedCode)
     }
 
     // =========================================================================
