@@ -8,6 +8,8 @@ import com.bandwidth.rtc.types.*
 import com.bandwidth.rtc.webrtc.PeerConnectionManagerInterface
 import io.mockk.*
 import kotlinx.coroutines.*
+import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.*
@@ -232,6 +234,56 @@ class BandwidthRTCConcurrencyTest {
         assertTrue(latch.await(5, TimeUnit.SECONDS))
         assertEquals(0, errors.get())
         assertEquals(threads * 20, results.get())
+    }
+
+    // =========================================================================
+    // publishMutex serialization
+    // =========================================================================
+
+    @Test
+    fun `concurrent publish and unpublish do not interleave under the publish mutex`() = runTest {
+        connectBrtc()
+
+        coEvery { mockPCManager.waitForPublishIceConnected() } just Runs
+        every { mockPCManager.addLocalTracks(any()) } returns buildMockMediaStream("already-published")
+        coEvery { mockPCManager.createPublishOffer() } returns "offer"
+        coEvery { mockSignaling.offerSdp(any(), any()) } returns OfferSdpResult("answer")
+        coEvery { mockPCManager.applyPublishAnswer(any()) } just Runs
+
+        // A stream already published before the concurrent publish()/unpublish() below race.
+        val existing = brtc.publish(audio = true)
+
+        // Blocks publish()'s renegotiation (still inside publishMutex) until released, so the
+        // test can assert unpublish()'s own mutex section has not run meanwhile. unpublish()'s
+        // later renegotiation reuses this same stub once the gate is open, which is fine - it
+        // isn't what removeLocalTracksCalled is tracking.
+        val gate = CompletableDeferred<Unit>()
+        every { mockPCManager.addLocalTracks(any()) } returns buildMockMediaStream("new-stream")
+        coEvery { mockSignaling.offerSdp(any(), any()) } coAnswers {
+            gate.await()
+            OfferSdpResult("answer")
+        }
+        var removeLocalTracksCalled = false
+        every { mockPCManager.removeLocalTracks(any()) } answers { removeLocalTracksCalled = true }
+
+        val publishJob = launch { brtc.publish(audio = true, alias = "second") }
+        val unpublishJob = launch { brtc.unpublish(existing) }
+
+        // Let both coroutines run up to their first real suspension point.
+        runCurrent()
+        assertFalse(
+            "unpublish's removeLocalTracks should be blocked on the mutex while publish is negotiating",
+            removeLocalTracksCalled
+        )
+
+        gate.complete(Unit)
+        advanceUntilIdle()
+
+        // publish() held the mutex for its whole attach+negotiate, so unpublish()'s track
+        // removal could only run after publish()'s renegotiation released it.
+        assertTrue(removeLocalTracksCalled)
+        assertTrue(publishJob.isCompleted)
+        assertTrue(unpublishJob.isCompleted)
     }
 
     // =========================================================================

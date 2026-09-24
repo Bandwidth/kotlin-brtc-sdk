@@ -294,10 +294,12 @@ class BandwidthRTCOrderOfOperationsTest {
         brtc.publish()
     }
 
-    @Test(expected = BandwidthRTCError.NotConnected::class)
-    fun `unpublish before connect throws NotConnected`() = runTest {
+    @Test
+    fun `unpublish before connect is a no-op instead of throwing`() = runTest {
+        // Mirrors unpublish-after-disconnect: nothing native is left to clean up, so the call
+        // should not force every caller to wrap it in a try/catch.
         val mockStream = buildMockMediaStream("s1")
-        brtc.unpublish(RtcStream(mediaStream = mockStream, mediaTypes = listOf(MediaType.AUDIO)))
+        brtc.unpublish(RtcStream(mediaStream = mockStream, mediaTypes = listOf(MediaType.AUDIO))) // should not throw
     }
 
     @Test(expected = BandwidthRTCError.NotConnected::class)
@@ -434,7 +436,7 @@ class BandwidthRTCOrderOfOperationsTest {
         val expectedOrder = listOf(
             "sig.connect", "setMediaPrefs",  // Connect phase
             "waitICE", "addTracks", "createOffer", "offerSdp", "applyAnswer",  // Publish
-            "removeTracks", "createOffer", "offerSdp", "applyAnswer",  // Unpublish
+            "removeTracks", "waitICE", "createOffer", "offerSdp", "applyAnswer",  // Unpublish
             "sig.disconnect", "pc.cleanup"  // Disconnect
         )
         assertEquals(expectedOrder, callOrder)

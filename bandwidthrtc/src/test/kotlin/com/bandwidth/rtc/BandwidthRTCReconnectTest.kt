@@ -8,6 +8,7 @@ import com.bandwidth.rtc.types.*
 import com.bandwidth.rtc.webrtc.PeerConnectionManagerInterface
 import io.mockk.*
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -65,7 +66,7 @@ class BandwidthRTCReconnectTest {
         val brtc = buildBrtc(this, handlers)
         brtc.connect(authParams)
 
-        handlers["close"]?.invoke("")
+        handlers["close"]?.invoke("1001")
         advanceUntilIdle()
 
         assertTrue(brtc.isConnected)
@@ -87,7 +88,7 @@ class BandwidthRTCReconnectTest {
         brtc.publish(audio = true, alias = "second")
         clearMocks(mockSignaling, answers = false, recordedCalls = true)
 
-        handlers["close"]?.invoke("")
+        handlers["close"]?.invoke("1001")
         advanceUntilIdle()
 
         verify(exactly = 1) { mockPCManager.republishLocalStream("stream-1", true) }
@@ -106,7 +107,7 @@ class BandwidthRTCReconnectTest {
         val stream = brtc.publish(audio = true)
         brtc.unpublish(stream)
 
-        handlers["close"]?.invoke("")
+        handlers["close"]?.invoke("1001")
         advanceUntilIdle()
 
         verify(exactly = 0) { mockPCManager.republishLocalStream(any(), any()) }
@@ -122,13 +123,112 @@ class BandwidthRTCReconnectTest {
         val brtc = buildBrtc(this, handlers)
         brtc.connect(authParams)
 
-        handlers["close"]?.invoke("")
+        handlers["close"]?.invoke("1001")
         assertFalse(brtc.isConnected)
 
         advanceUntilIdle()
 
         assertTrue(brtc.isConnected)
         coVerify(exactly = 2) { mockSignaling.connect(authParams, null) }
+    }
+
+    @Test
+    fun `close code 1001 is the only one that reconnects`() = runTest {
+        val handlers = mutableMapOf<String, (String) -> Unit>()
+        val brtc = buildBrtc(this, handlers)
+        brtc.connect(authParams)
+
+        handlers["close"]?.invoke("1001")
+        advanceUntilIdle()
+
+        coVerify(exactly = 2) { mockSignaling.connect(authParams, null) }
+    }
+
+    @Test
+    fun `close code 1000 does not reconnect and surfaces an error`() = runTest {
+        assertNonRetryableCloseCode(this, "1000")
+    }
+
+    @Test
+    fun `close code 4409 (superseded by a newer connection) does not reconnect and surfaces an error`() = runTest {
+        assertNonRetryableCloseCode(this, "4409")
+    }
+
+    @Test
+    fun `close code 1011 (internal gateway error) does not reconnect and surfaces an error`() = runTest {
+        assertNonRetryableCloseCode(this, "1011")
+    }
+
+    @Test
+    fun `unrecognized close code does not reconnect and surfaces an error`() = runTest {
+        assertNonRetryableCloseCode(this, "9999")
+    }
+
+    @Test
+    fun `missing close code does not reconnect and surfaces an error`() = runTest {
+        assertNonRetryableCloseCode(this, "")
+    }
+
+    /** Builds a fresh instance (and mocks) per call so verification counts aren't cross-contaminated. */
+    private suspend fun assertNonRetryableCloseCode(scope: TestScope, code: String) {
+        val ctx = mockk<Context>(relaxed = true)
+        val sig = mockk<SignalingClientInterface>(relaxed = true)
+        val pcm = mockk<PeerConnectionManagerInterface>(relaxed = true)
+        val handlers = mutableMapOf<String, (String) -> Unit>()
+        every { sig.onEvent(any(), any()) } answers { handlers[firstArg()] = secondArg() }
+        coEvery { sig.setMediaPreferences() } returns SetMediaPreferencesResult()
+
+        val brtc = BandwidthRTC(context = ctx, signaling = sig, peerConnectionManager = pcm, scope = scope)
+        brtc.connect(authParams)
+
+        var reported: Throwable? = null
+        brtc.onError = { reported = it }
+
+        handlers["close"]?.invoke(code)
+        scope.advanceUntilIdle()
+
+        assertFalse("code $code should leave the session disconnected", brtc.isConnected)
+        assertNotNull("code $code should surface an error", reported)
+        // Only the initial connect() - no reconnect attempt was made.
+        coVerify(exactly = 1) { sig.connect(authParams, null) }
+    }
+
+    @Test
+    fun `abnormal closure with no close frame (1006) does not reconnect`() = runTest {
+        // OkHttp's onFailure carries no close code; SignalingClient synthesizes 1006 for it
+        // (see CLOSE_CODE_ABNORMAL), matching the browser/rpc-websockets convention for an
+        // abnormal closure so this SDK treats a network drop the same non-retryable way as JS.
+        val handlers = mutableMapOf<String, (String) -> Unit>()
+        val brtc = buildBrtc(this, handlers)
+        brtc.connect(authParams)
+
+        var reported: Throwable? = null
+        brtc.onError = { reported = it }
+
+        handlers["close"]?.invoke("1006")
+        advanceUntilIdle()
+
+        assertFalse(brtc.isConnected)
+        assertNotNull(reported)
+        coVerify(exactly = 1) { mockSignaling.connect(authParams, null) }
+    }
+
+    @Test
+    fun `non-retryable close does not surface an error when disconnect was application initiated`() = runTest {
+        val handlers = mutableMapOf<String, (String) -> Unit>()
+        val brtc = buildBrtc(this, handlers)
+        brtc.connect(authParams)
+        brtc.disconnect()
+
+        var reported: Throwable? = null
+        brtc.onError = { reported = it }
+
+        // A close racing disconnect() would already be ignored (this.signaling was replaced with
+        // null), but assert the outcome directly rather than relying on that timing.
+        handlers["close"]?.invoke("1000")
+        advanceUntilIdle()
+
+        assertNull(reported)
     }
 
     @Test
@@ -166,7 +266,7 @@ class BandwidthRTCReconnectTest {
         brtc.onError = { reported = it }
         coEvery { mockSignaling.connect(any(), any()) } throws BandwidthRTCError.InvalidToken()
 
-        handlers["close"]?.invoke("")
+        handlers["close"]?.invoke("1001")
         advanceUntilIdle()
 
         // One failed attempt only - a bad token will not become valid on a retry.
@@ -185,7 +285,7 @@ class BandwidthRTCReconnectTest {
         coEvery { mockSignaling.connect(any(), any()) } throws
             BandwidthRTCError.RpcError(409, "Endpoint already connected")
 
-        handlers["close"]?.invoke("")
+        handlers["close"]?.invoke("1001")
         advanceUntilIdle()
 
         coVerify(exactly = 2) { mockSignaling.connect(any(), any()) }
@@ -203,7 +303,7 @@ class BandwidthRTCReconnectTest {
         coEvery { mockSignaling.connect(any(), any()) } throws
             BandwidthRTCError.ConnectionFailed("network down")
 
-        handlers["close"]?.invoke("")
+        handlers["close"]?.invoke("1001")
         advanceUntilIdle()
 
         assertFalse(brtc.isConnected)
@@ -224,7 +324,7 @@ class BandwidthRTCReconnectTest {
         every { mockPCManager.republishLocalStream(any(), any()) } throws
             BandwidthRTCError.PublishFailed("no publishing peer connection")
 
-        handlers["close"]?.invoke("")
+        handlers["close"]?.invoke("1001")
         advanceUntilIdle()
 
         assertTrue(reported is BandwidthRTCError.PublishFailed)
@@ -237,7 +337,7 @@ class BandwidthRTCReconnectTest {
         brtc.connect(authParams)
 
         repeat(3) {
-            handlers["close"]?.invoke("")
+            handlers["close"]?.invoke("1001")
             advanceUntilIdle()
         }
 
