@@ -29,6 +29,7 @@ interface PeerConnectionManagerInterface {
         sdpRevision: Long?,
         metadata: Map<String, TrackMetadata>?
     ): String
+    suspend fun handlePublishSdpOffer(sdpOffer: String, sdpRevision: Long?): String
 
     fun sendDtmf(tone: String, duration: Int = 100, interToneGap: Int = 50)
     fun cleanup()

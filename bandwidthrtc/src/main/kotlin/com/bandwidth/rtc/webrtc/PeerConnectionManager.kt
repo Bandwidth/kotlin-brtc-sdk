@@ -49,6 +49,10 @@ class PeerConnectionManager(
     private val subscribedTrackMetadata = ConcurrentHashMap<String, TrackMetadata>()
     var subscribeSdpRevision: Long = 0
         private set
+    // Tracks gateway-initiated ICE restarts on the publishing connection; separate from
+    // subscribeSdpRevision because the two peer connections renegotiate independently.
+    var publishSdpRevision: Long = 0
+        private set
 
     override var onStreamAvailable: ((MediaStream, List<MediaType>, TrackMetadata?) -> Unit)? = null
     override var onStreamUnavailable: ((String) -> Unit)? = null
@@ -464,6 +468,73 @@ class PeerConnectionManager(
         return answerSdp
     }
 
+    /**
+     * Applies a gateway-initiated ICE restart offer on the publishing connection and answers it.
+     * The gateway owns ICE restart for this side - the SDK never creates this offer itself, only
+     * answers it - so unlike [createPublishOffer] there is no local createOffer step here.
+     */
+    override suspend fun handlePublishSdpOffer(sdpOffer: String, sdpRevision: Long?): String {
+        if (disposed) {
+            throw BandwidthRTCError.SdpNegotiationFailed("Peer connection manager has been cleaned up")
+        }
+        val effectiveRevision = sdpRevision ?: (publishSdpRevision + 1)
+
+        if (effectiveRevision <= publishSdpRevision && publishSdpRevision != 0L) {
+            log.warn("Rejecting stale publish SDP offer (revision $effectiveRevision <= $publishSdpRevision)")
+            throw BandwidthRTCError.SdpNegotiationFailed("Stale SDP offer")
+        }
+
+        val pc = publishingPC
+            ?: throw BandwidthRTCError.SdpNegotiationFailed("Publishing peer connection not available")
+
+        log.debug("[publish] Handling gateway-initiated offer (revision=$effectiveRevision)")
+
+        val offer = SessionDescription(SessionDescription.Type.OFFER, sdpOffer)
+
+        suspendCoroutine { continuation ->
+            continuation.withLiveNative {
+                pc.setRemoteDescription(object : SdpObserver {
+                    override fun onSetSuccess() = continuation.resume(Unit)
+                    override fun onSetFailure(error: String?) =
+                        continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "setRemoteDescription failed"))
+                    override fun onCreateSuccess(sdp: SessionDescription?) {}
+                    override fun onCreateFailure(error: String?) {}
+                }, offer)
+            }
+        }
+
+        val answerConstraints = MediaConstraints()
+        val answerSdp = suspendCoroutine { continuation ->
+            continuation.withLiveNative {
+                pc.createAnswer(object : SdpObserver {
+                    override fun onCreateSuccess(sdp: SessionDescription?) {
+                        if (sdp == null) {
+                            continuation.resumeWithException(
+                                BandwidthRTCError.SdpNegotiationFailed("No SDP answer generated")
+                            )
+                            return
+                        }
+                        pc.setLocalDescription(object : SdpObserver {
+                            override fun onSetSuccess() = continuation.resume(sdp.description)
+                            override fun onSetFailure(error: String?) =
+                                continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "setLocalDescription failed"))
+                            override fun onCreateSuccess(sdp: SessionDescription?) {}
+                            override fun onCreateFailure(error: String?) {}
+                        }, sdp)
+                    }
+                    override fun onCreateFailure(error: String?) =
+                        continuation.resumeWithException(BandwidthRTCError.SdpNegotiationFailed(error ?: "createAnswer failed"))
+                    override fun onSetSuccess() {}
+                    override fun onSetFailure(error: String?) {}
+                }, answerConstraints)
+            }
+        }
+
+        publishSdpRevision = effectiveRevision
+        log.debug("[publish] Complete (revision=$effectiveRevision)")
+        return answerSdp
+    }
+
     override fun removeLocalTracks(streamId: String) {
         useNative {
             val pc = publishingPC ?: return@useNative
@@ -693,6 +764,7 @@ class PeerConnectionManager(
         factoryInitialized = false
 
         subscribeSdpRevision = 0
+        publishSdpRevision = 0
         publishIceConnected = false
         log.info("Peer connections cleaned up")
     }
