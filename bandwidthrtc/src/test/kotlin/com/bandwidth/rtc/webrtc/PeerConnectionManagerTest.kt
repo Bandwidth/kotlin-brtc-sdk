@@ -480,6 +480,90 @@ class PeerConnectionManagerTest {
     }
 
     // -------------------------------------------------------------------------
+    // handlePublishSdpOffer() - gateway-initiated ICE restart on the publishing connection
+    // -------------------------------------------------------------------------
+
+    @Test(expected = BandwidthRTCError.SdpNegotiationFailed::class)
+    fun `handlePublishSdpOffer throws when publish PC not set up`() = runTest {
+        manager.handlePublishSdpOffer("offer", sdpRevision = 1)
+    }
+
+    @Test
+    fun `handlePublishSdpOffer returns answer SDP and updates publishSdpRevision`() = runTest {
+        manager.setupPublishingPeerConnection()
+
+        val mockAnswer = buildRealSdp("pub-answer")
+        stubSdpAnswerFlow(mockPublishPc, mockAnswer)
+
+        assertEquals(0, manager.publishSdpRevision)
+
+        val result = manager.handlePublishSdpOffer("offer", sdpRevision = 1)
+
+        assertEquals("pub-answer", result)
+        assertEquals(1, manager.publishSdpRevision)
+    }
+
+    @Test
+    fun `handlePublishSdpOffer does not disturb subscribeSdpRevision`() = runTest {
+        manager.setupPublishingPeerConnection()
+        manager.setupSubscribingPeerConnection()
+
+        stubSdpAnswerFlow(mockPublishPc, buildRealSdp("pub-answer"))
+        stubSdpAnswerFlow(mockSubscribePc, buildRealSdp("sub-answer"))
+
+        manager.handleSubscribeSdpOffer("sub-offer", sdpRevision = 9, metadata = null)
+        manager.handlePublishSdpOffer("pub-offer", sdpRevision = 1)
+
+        assertEquals(9, manager.subscribeSdpRevision)
+        assertEquals(1, manager.publishSdpRevision)
+    }
+
+    @Test
+    fun `handlePublishSdpOffer rejects stale offer after first is accepted`() = runTest {
+        manager.setupPublishingPeerConnection()
+
+        val mockAnswer = buildRealSdp("pub-answer")
+        stubSdpAnswerFlow(mockPublishPc, mockAnswer)
+
+        manager.handlePublishSdpOffer("offer1", sdpRevision = 5)
+        assertEquals(5, manager.publishSdpRevision)
+
+        try {
+            manager.handlePublishSdpOffer("offer2", sdpRevision = 3)
+            fail("Expected SdpNegotiationFailed for stale offer")
+        } catch (e: BandwidthRTCError.SdpNegotiationFailed) {
+            assertTrue(e.message!!.contains("Stale"))
+        }
+
+        assertEquals(5, manager.publishSdpRevision)
+    }
+
+    @Test
+    fun `handlePublishSdpOffer accepts higher revision after first`() = runTest {
+        manager.setupPublishingPeerConnection()
+
+        stubSdpAnswerFlow(mockPublishPc, buildRealSdp("pub-answer"))
+
+        manager.handlePublishSdpOffer("offer1", sdpRevision = 3)
+        manager.handlePublishSdpOffer("offer2", sdpRevision = 4)
+
+        assertEquals(4, manager.publishSdpRevision)
+    }
+
+    @Test
+    fun `cleanup resets publishSdpRevision to zero`() = runTest {
+        manager.setupPublishingPeerConnection()
+
+        stubSdpAnswerFlow(mockPublishPc, buildRealSdp("pub-answer"))
+        manager.handlePublishSdpOffer("offer", sdpRevision = 7)
+        assertEquals(7, manager.publishSdpRevision)
+
+        manager.cleanup()
+
+        assertEquals(0, manager.publishSdpRevision)
+    }
+
+    // -------------------------------------------------------------------------
     // removeLocalTracks()
     // -------------------------------------------------------------------------
 

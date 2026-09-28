@@ -18,6 +18,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 import org.webrtc.PeerConnection
 import java.util.concurrent.CopyOnWriteArrayList
@@ -27,6 +29,10 @@ private const val RECONNECT_INITIAL_DELAY_MS = 1_000L
 private const val RECONNECT_MAX_DELAY_MS = 30_000L
 private const val RECONNECT_JITTER_MS = 500L
 private const val RECONNECT_MAX_ATTEMPTS = 8
+
+// The only close code the gateway sends to mean "come back on this session". Every other code -
+// including ones this SDK doesn't recognize yet - means retrying cannot succeed.
+private const val RETRYABLE_CLOSE_CODE = 1001
 
 /**
  * Main entry point for the Bandwidth BRTC SDK.
@@ -82,6 +88,11 @@ class BandwidthRTC(
 
     /** Streams published through this instance, retained so they can be re-published after a reconnect. */
     private val publishRecords = CopyOnWriteArrayList<PublishRecord>()
+
+    // Serializes publish()'s attach+negotiate, unpublish()'s track removal+renegotiation,
+    // republishStreams()'s renegotiation, and a gateway-initiated publish SDP offer (ICE restart)
+    // so none of them can interleave and negotiate over a half-mutated set of transceivers.
+    private val publishMutex = Mutex()
 
     @Volatile
     private var userInitiatedDisconnect = false
@@ -396,21 +407,27 @@ class BandwidthRTC(
         pcManager.waitForPublishIceConnected()
         Logger.debug("Publish PC ICE connected — proceeding with publish")
 
-        val mediaStream = pcManager.addLocalTracks(audio = audio)
+        // Attach the new track and renegotiate atomically: an unpublish() or a gateway-initiated
+        // ICE restart racing in between would otherwise mutate transceivers mid-offer or
+        // renegotiate before this stream's track is even attached.
+        val stream = publishMutex.withLock {
+            val mediaStream = pcManager.addLocalTracks(audio = audio)
 
-        val localOffer = pcManager.createPublishOffer()
-        Logger.debug("Created publish offer with local tracks")
+            val localOffer = pcManager.createPublishOffer()
+            Logger.debug("Created publish offer with local tracks")
 
-        val result = signalingClient.offerSdp(sdpOffer = localOffer, peerType = "publish")
-        Logger.debug("Server answered publish offer")
+            val result = signalingClient.offerSdp(sdpOffer = localOffer, peerType = "publish")
+            Logger.debug("Server answered publish offer")
 
-        pcManager.applyPublishAnswer(remoteAnswer = result.sdpAnswer)
-        Logger.debug("Publish SDP exchange complete")
+            pcManager.applyPublishAnswer(remoteAnswer = result.sdpAnswer)
+            Logger.debug("Publish SDP exchange complete")
 
-        val mediaTypes = mutableListOf<MediaType>()
-        if (audio) mediaTypes.add(MediaType.AUDIO)
+            val mediaTypes = mutableListOf<MediaType>()
+            if (audio) mediaTypes.add(MediaType.AUDIO)
 
-        val stream = RtcStream(mediaStream = mediaStream, mediaTypes = mediaTypes, alias = alias)
+            RtcStream(mediaStream = mediaStream, mediaTypes = mediaTypes, alias = alias)
+        }
+
         publishRecords.add(PublishRecord(id = stream.streamId, audio = audio, alias = alias, stream = stream))
         Logger.info("Published stream ${stream.streamId}")
         return stream
@@ -422,15 +439,43 @@ class BandwidthRTC(
         val pcManager = peerConnectionManager
         val signalingClient = signaling
         if (!isConnected || pcManager == null || signalingClient == null) {
-            throw BandwidthRTCError.NotConnected()
+            // Session already torn down (disconnect(), or a fatal close beat this call here) -
+            // every native track is already disposed, so just drop the bookkeeping rather than
+            // throwing for a call whose intent is already satisfied.
+            publishRecords.removeIf { it.id == stream.streamId }
+            Logger.info("unpublish() called after disconnect; dropped local record for ${stream.streamId}")
+            return
         }
 
-        publishRecords.removeIf { it.id == stream.streamId }
-        pcManager.removeLocalTracks(streamId = stream.streamId)
+        if (!publishRecords.removeIf { it.id == stream.streamId }) {
+            // Unknown id: nothing to remove, so renegotiating would be a no-op.
+            Logger.warn("unpublish: stream ${stream.streamId} is not currently published")
+            return
+        }
 
-        val localOffer = pcManager.createPublishOffer()
-        val result = signalingClient.offerSdp(sdpOffer = localOffer, peerType = "publish")
-        pcManager.applyPublishAnswer(remoteAnswer = result.sdpAnswer)
+        // Stop local tracks first, under the mutex, so unpublish takes effect locally even if
+        // renegotiation below fails, and so a concurrent publish()/republishStreams() can't
+        // negotiate over a half-mutated set of transceivers.
+        publishMutex.withLock {
+            pcManager.removeLocalTracks(streamId = stream.streamId)
+        }
+
+        try {
+            // Waited on outside the mutex: the gateway rejects offers until the publish peer is
+            // connected, and this wait can take up to 10s - holding the mutex here would block
+            // publish() and a gateway-initiated ICE restart offer (handlePublishSdpOffer) for
+            // that long.
+            pcManager.waitForPublishIceConnected()
+            publishMutex.withLock {
+                val localOffer = pcManager.createPublishOffer()
+                val result = signalingClient.offerSdp(sdpOffer = localOffer, peerType = "publish")
+                pcManager.applyPublishAnswer(remoteAnswer = result.sdpAnswer)
+            }
+        } catch (e: Exception) {
+            throw BandwidthRTCError.PublishFailed(
+                "Stream ${stream.streamId} was unpublished locally, but renegotiation with the gateway failed: ${e.message}"
+            )
+        }
 
         Logger.info("Unpublished stream ${stream.streamId}")
     }
@@ -529,7 +574,7 @@ class BandwidthRTC(
         signaling.onEvent("sdpOffer") { data ->
             Logger.info("Signaling event: sdpOffer")
             scope.launch {
-                handleSubscribeSdpOffer(data)
+                handleSdpOffer(data)
             }
         }
 
@@ -553,14 +598,15 @@ class BandwidthRTC(
         }
 
         val deadSignaling = signaling
-        signaling.onEvent("close") {
+        signaling.onEvent("close") { data ->
             // A late close from a client we have already replaced must not tear down the new session.
             if (this.signaling !== deadSignaling) {
                 Logger.info("Ignoring close from a replaced signaling client")
                 return@onEvent
             }
 
-            Logger.info("Signaling event: close")
+            val closeCode = data.toIntOrNull()
+            Logger.info("Signaling event: close (code=$closeCode)")
             Logger.warn("WebSocket closed")
             isConnected = false
             hasActiveCall = false
@@ -570,9 +616,27 @@ class BandwidthRTC(
             releaseMedia()
             this.signaling = null
 
-            if (reconnectJob?.isActive != true) reconnectJob = scope.launch {
-                runCatching { deadSignaling.disconnect() }
-                scheduleReconnect()
+            if (closeCode == RETRYABLE_CLOSE_CODE) {
+                if (reconnectJob?.isActive != true) reconnectJob = scope.launch {
+                    runCatching { deadSignaling.disconnect() }
+                    scheduleReconnect()
+                }
+            } else {
+                // Every other code - 1000 (endpoint gone), 4409 (superseded by a newer connection
+                // from this same device), 1011 (internal gateway error), an abnormal closure with
+                // no close frame at all, or any other/unknown code - means retrying this session
+                // cannot succeed. Tear down for good instead of quietly retrying forever.
+                Logger.error("Non-retryable close code $closeCode - not reconnecting")
+                reconnectJob?.cancel()
+                reconnectJob = null
+                scope.launch { runCatching { deadSignaling.disconnect() } }
+                if (!userInitiatedDisconnect) {
+                    scope.launch {
+                        safeCallback("onError") {
+                            onError?.invoke(BandwidthRTCError.ConnectionFailed("WebSocket closed with non-retryable code $closeCode"))
+                        }
+                    }
+                }
             }
         }
     }
@@ -674,6 +738,11 @@ class BandwidthRTC(
         pcManager.waitForPublishIceConnected()
 
         for (record in publishRecords) {
+            // unpublish() can race a reconnect and remove a record while this loop is running -
+            // skip it instead of re-attaching a stream the caller already asked to stop.
+            if (!publishRecords.contains(record)) {
+                continue
+            }
             val mediaStream = pcManager.republishLocalStream(streamId = record.id, audio = record.audio)
             record.stream = RtcStream(
                 mediaStream = mediaStream,
@@ -685,21 +754,45 @@ class BandwidthRTC(
         // Mute is not reapplied here: it lives on the audio device, which establishSession()
         // already restored before this runs.
 
-        // A single renegotiation covers every republished stream.
-        val localOffer = pcManager.createPublishOffer()
-        val result = signalingClient.offerSdp(sdpOffer = localOffer, peerType = "publish")
-        pcManager.applyPublishAnswer(remoteAnswer = result.sdpAnswer)
+        // A single renegotiation covers every republished stream, under the same mutex as
+        // publish()/unpublish() so it can't interleave with either.
+        publishMutex.withLock {
+            val localOffer = pcManager.createPublishOffer()
+            val result = signalingClient.offerSdp(sdpOffer = localOffer, peerType = "publish")
+            pcManager.applyPublishAnswer(remoteAnswer = result.sdpAnswer)
+        }
         Logger.info("Republish complete")
     }
 
-    private suspend fun handleSubscribeSdpOffer(data: String) {
-        Logger.debug("Subscribe SDP offer received (${data.length} chars)")
+    /**
+     * Routes a gateway "sdpOffer" notification by peerType: "publish" is a gateway-initiated ICE
+     * restart on the publishing connection; anything else (including a missing peerType, for
+     * older gateways) is the existing subscribe renegotiation.
+     */
+    private suspend fun handleSdpOffer(data: String) {
+        Logger.debug("SDP offer received (${data.length} chars)")
 
         if (!hasActiveCall) {
             Logger.info("Ignoring SDP offer — no active call (post-hangup)")
             return
         }
 
+        val notification = try {
+            json.decodeFromString(SDPOfferNotification.serializer(), data)
+        } catch (e: Exception) {
+            Logger.error("Failed to decode SDPOfferNotification: ${e.message}")
+            Logger.error("Raw data preview: ${data.take(500)}")
+            return
+        }
+
+        if (notification.peerType == "publish") {
+            handlePublishSdpOffer(notification)
+        } else {
+            handleSubscribeSdpOffer(notification)
+        }
+    }
+
+    private suspend fun handleSubscribeSdpOffer(notification: SDPOfferNotification) {
         val pcManager = peerConnectionManager
         val sig = signaling
         if (pcManager == null || sig == null) {
@@ -708,14 +801,6 @@ class BandwidthRTC(
         }
 
         try {
-            val notification = try {
-                json.decodeFromString(SDPOfferNotification.serializer(), data)
-            } catch (e: Exception) {
-                Logger.error("Failed to decode SDPOfferNotification: ${e.message}")
-                Logger.error("Raw data preview: ${data.take(500)}")
-                return
-            }
-
             Logger.debug("Subscribe SDP offer: revision=${notification.sdpRevision}, peerType=${notification.peerType}, endpointId=${notification.endpointId}")
 
             val answerSdp = pcManager.handleSubscribeSdpOffer(
@@ -729,6 +814,39 @@ class BandwidthRTC(
             Logger.debug("Subscribe SDP answer sent (revision=${notification.sdpRevision})")
         } catch (e: Exception) {
             Logger.error("Failed to handle subscribe SDP offer: ${e.message}")
+        }
+    }
+
+    /**
+     * A gateway-initiated ICE restart on the publishing connection. The gateway owns ICE restart
+     * for the publish side - this only answers what it sends, it never initiates one itself. Runs
+     * under [publishMutex] so it can't interleave with publish()/unpublish()/republishStreams().
+     */
+    private suspend fun handlePublishSdpOffer(notification: SDPOfferNotification) {
+        val pcManager = peerConnectionManager
+        val sig = signaling
+        if (pcManager == null || sig == null) {
+            Logger.error("Publish SDP offer received but pcManager or signaling is null")
+            return
+        }
+
+        try {
+            publishMutex.withLock {
+                Logger.debug("Publish SDP offer: revision=${notification.sdpRevision}, endpointId=${notification.endpointId}")
+
+                val answerSdp = pcManager.handlePublishSdpOffer(
+                    sdpOffer = notification.sdpOffer,
+                    sdpRevision = notification.sdpRevision
+                )
+
+                sig.answerSdp(sdpAnswer = answerSdp, peerType = "publish")
+
+                Logger.debug("Publish SDP answer sent (revision=${notification.sdpRevision})")
+            }
+        } catch (e: Exception) {
+            // A failed ICE-restart answer leaves publish media down, unlike a dropped subscribe
+            // renegotiation, so this warrants more than debug-level logging.
+            Logger.warn("Failed to handle publish SDP offer: ${e.message}")
         }
     }
 }

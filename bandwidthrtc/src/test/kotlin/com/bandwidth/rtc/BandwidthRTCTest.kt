@@ -272,11 +272,28 @@ class BandwidthRTCTest {
     // unpublish()
     // -------------------------------------------------------------------------
 
-    @Test(expected = BandwidthRTCError.NotConnected::class)
-    fun `unpublish throws NotConnected when not connected`() = runTest {
+    @Test
+    fun `unpublish after disconnect is a no-op instead of throwing`() = runTest {
+        // The session already tore down; every native track is already gone, so this should
+        // just drop the local bookkeeping instead of forcing every caller to catch NotConnected.
         val mockStream = buildMockMediaStream("s1")
         val rtcStream = RtcStream(mediaStream = mockStream, mediaTypes = listOf(MediaType.AUDIO))
+        brtc.unpublish(rtcStream) // should not throw
+    }
+
+    @Test
+    fun `unpublish an unknown stream is a no-op`() = runTest {
+        connectBrtc()
+
+        // Never published through this instance - unlike removing every published stream, this
+        // should be a no-op rather than renegotiating away media the caller never asked about.
+        val mockStream = buildMockMediaStream("never-published")
+        val rtcStream = RtcStream(mediaStream = mockStream, mediaTypes = listOf(MediaType.AUDIO))
+
         brtc.unpublish(rtcStream)
+
+        verify(exactly = 0) { mockPCManager.removeLocalTracks(any()) }
+        coVerify(exactly = 0) { mockSignaling.offerSdp(any(), any()) }
     }
 
     @Test
@@ -284,12 +301,13 @@ class BandwidthRTCTest {
         connectBrtc()
 
         val mockStream = buildMockMediaStream("stream-to-unpub")
-        val rtcStream = RtcStream(mediaStream = mockStream, mediaTypes = listOf(MediaType.AUDIO))
-
+        coEvery { mockPCManager.waitForPublishIceConnected() } just Runs
+        every { mockPCManager.addLocalTracks(any()) } returns mockStream
         coEvery { mockPCManager.createPublishOffer() } returns "unpub-offer"
         coEvery { mockSignaling.offerSdp("unpub-offer", "publish") } returns OfferSdpResult("unpub-answer")
         coEvery { mockPCManager.applyPublishAnswer("unpub-answer") } just Runs
 
+        val rtcStream = brtc.publish(audio = true)
         brtc.unpublish(rtcStream)
 
         verify { mockPCManager.removeLocalTracks("stream-to-unpub") }
@@ -305,12 +323,14 @@ class BandwidthRTCTest {
         // An RtcStream the app still holds from before a reconnect wraps a MediaStream whose
         // owning factory has since been disposed; touching it again would be a use-after-free.
         val mockStream = buildMockMediaStream("stale-stream")
-        val rtcStream = RtcStream(mediaStream = mockStream, mediaTypes = listOf(MediaType.AUDIO))
-        every { mockStream.id } throws IllegalStateException("MediaStream has been disposed")
-
+        coEvery { mockPCManager.waitForPublishIceConnected() } just Runs
+        every { mockPCManager.addLocalTracks(any()) } returns mockStream
         coEvery { mockPCManager.createPublishOffer() } returns "unpub-offer"
         coEvery { mockSignaling.offerSdp("unpub-offer", "publish") } returns OfferSdpResult("unpub-answer")
         coEvery { mockPCManager.applyPublishAnswer("unpub-answer") } just Runs
+
+        val rtcStream = brtc.publish(audio = true)
+        every { mockStream.id } throws IllegalStateException("MediaStream has been disposed")
 
         brtc.unpublish(rtcStream)
 
@@ -587,6 +607,47 @@ class BandwidthRTCTest {
         Thread.sleep(200)
 
         coVerify(atLeast = 1) { mockPCManager.handleSubscribeSdpOffer(any(), any(), any()) }
+    }
+
+    @Test
+    fun `sdpOffer with peerType publish routes to the publishing PC and answers as publish`() = runTest {
+        val eventHandlers = captureEventHandlers()
+
+        coEvery { mockPCManager.handlePublishSdpOffer(any(), any()) } returns "publish-answer-sdp"
+
+        eventHandlers["sdpOffer"]?.invoke("""{"sdpOffer":"v=0...","peerType":"publish","sdpRevision":42}""")
+        // Handler runs on Dispatchers.IO — give real time for the coroutine to execute.
+        Thread.sleep(200)
+
+        coVerify(atLeast = 1) { mockPCManager.handlePublishSdpOffer("v=0...", 42L) }
+        coVerify(atLeast = 1) { mockSignaling.answerSdp("publish-answer-sdp", "publish") }
+        coVerify(exactly = 0) { mockPCManager.handleSubscribeSdpOffer(any(), any(), any()) }
+    }
+
+    @Test
+    fun `sdpOffer with missing peerType still routes to subscribe`() = runTest {
+        val eventHandlers = captureEventHandlers()
+
+        coEvery { mockPCManager.handleSubscribeSdpOffer(any(), any(), any()) } returns "subscribe-answer-sdp"
+
+        eventHandlers["sdpOffer"]?.invoke("""{"sdpOffer":"v=0...","sdpRevision":1}""")
+        Thread.sleep(200)
+
+        coVerify(atLeast = 1) { mockPCManager.handleSubscribeSdpOffer(any(), any(), any()) }
+        coVerify(exactly = 0) { mockPCManager.handlePublishSdpOffer(any(), any()) }
+    }
+
+    @Test
+    fun `publish sdpOffer ignored after hangup`() = runTest {
+        val eventHandlers = captureEventHandlers()
+        coEvery { mockSignaling.hangupConnection(any(), any()) } returns HangupResult(result = "bye")
+
+        brtc.hangupConnection("+15551234567", EndpointType.PHONE_NUMBER)
+
+        eventHandlers["sdpOffer"]?.invoke("""{"sdpOffer":"v=0...","peerType":"publish","sdpRevision":1}""")
+        kotlinx.coroutines.delay(50)
+
+        coVerify(exactly = 0) { mockPCManager.handlePublishSdpOffer(any(), any()) }
     }
 
     @Test
