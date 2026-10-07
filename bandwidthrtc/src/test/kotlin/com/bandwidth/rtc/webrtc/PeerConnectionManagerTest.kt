@@ -797,6 +797,57 @@ class PeerConnectionManagerTest {
         assertTrue(called)
     }
 
+    private fun statsReport(vararg stats: Pair<String, Map<String, Any>>): RTCStatsReport {
+        val map = stats.associate { (type, members) ->
+            val stat = mockk<RTCStats>()
+            every { stat.type } returns type
+            every { stat.members } returns members
+            "$type-${members["kind"]}" to stat
+        }
+        val report = mockk<RTCStatsReport>()
+        every { report.statsMap } returns map
+        return report
+    }
+
+    private fun publishSnapshot(report: RTCStatsReport): CallStatsSnapshot {
+        manager.setupPublishingPeerConnection()
+        every { mockPublishPc.getStats(any<RTCStatsCollectorCallback>()) } answers {
+            firstArg<RTCStatsCollectorCallback>().onStatsDelivered(report)
+        }
+        var snapshot: CallStatsSnapshot? = null
+        manager.getCallStats(0, 0, 0.0) { snapshot = it }
+        return snapshot!!
+    }
+
+    @Test
+    fun `getCallStats reads RTCP receiver report from remote-inbound-rtp`() {
+        val snapshot = publishSnapshot(
+            statsReport(
+                "outbound-rtp" to mapOf("kind" to "audio", "packetsSent" to 10L, "bytesSent" to 800L),
+                "remote-inbound-rtp" to mapOf(
+                    "kind" to "audio", "fractionLost" to 0.25, "jitter" to 0.004, "roundTripTime" to 0.08
+                )
+            )
+        )
+
+        assertEquals(10, snapshot.packetsSent)
+        assertEquals(0.25, snapshot.remoteFractionLost, 0.0)
+        assertEquals(0.004, snapshot.remoteJitter, 0.0)
+        assertEquals(0.08, snapshot.rtcpRoundTripTime, 0.0)
+    }
+
+    @Test
+    fun `getCallStats leaves RTCP fields at zero when remote-inbound-rtp is absent`() {
+        val snapshot = publishSnapshot(
+            statsReport("outbound-rtp" to mapOf("kind" to "audio", "packetsSent" to 10L, "bytesSent" to 800L))
+        )
+
+        assertEquals(10, snapshot.packetsSent)
+        assertEquals(0.0, snapshot.remoteFractionLost, 0.0)
+        assertEquals(0.0, snapshot.remoteJitter, 0.0)
+        assertEquals(0.0, snapshot.rtcpRoundTripTime, 0.0)
+    }
+
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------

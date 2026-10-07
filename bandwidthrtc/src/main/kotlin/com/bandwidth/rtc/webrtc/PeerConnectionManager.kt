@@ -677,6 +677,15 @@ class PeerConnectionManager(
                                 snapshot.bytesSent = (stat.members["bytesSent"] as? Number)?.toInt() ?: 0
                             }
                         }
+                        // Remote receiver's RTCP report on our outbound stream.
+                        if (stat.type == "remote-inbound-rtp") {
+                            val kind = stat.members["kind"] as? String
+                            if (kind == "audio") {
+                                snapshot.remoteFractionLost = (stat.members["fractionLost"] as? Number)?.toDouble() ?: 0.0
+                                snapshot.remoteJitter = (stat.members["jitter"] as? Number)?.toDouble() ?: 0.0
+                                snapshot.rtcpRoundTripTime = (stat.members["roundTripTime"] as? Number)?.toDouble() ?: 0.0
+                            }
+                        }
                     }
                     checkDone()
                 })
