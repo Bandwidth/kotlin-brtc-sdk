@@ -12,6 +12,11 @@ data class CallStatsSnapshot(
     var packetsSent: Int = 0,
     var bytesSent: Int = 0,
 
+    // RTCP receiver report (from remote-inbound-rtp on publish PC)
+    var remoteFractionLost: Double = 0.0,
+    var remoteJitter: Double = 0.0,
+    var rtcpRoundTripTime: Double = 0.0,
+
     // Derived / extra
     var roundTripTime: Double = 0.0,
     var codec: String = "unknown",
