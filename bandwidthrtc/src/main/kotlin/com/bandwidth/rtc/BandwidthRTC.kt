@@ -17,6 +17,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -29,6 +30,9 @@ private const val RECONNECT_INITIAL_DELAY_MS = 1_000L
 private const val RECONNECT_MAX_DELAY_MS = 30_000L
 private const val RECONNECT_JITTER_MS = 500L
 private const val RECONNECT_MAX_ATTEMPTS = 8
+
+// How often the call stats snapshot is written to the debug log while connected.
+private const val CALL_STATS_TRACE_INTERVAL_MS = 5 * 60 * 1_000L
 
 // The only close code the gateway sends to mean "come back on this session". Every other code -
 // including ones this SDK doesn't recognize yet - means retrying cannot succeed.
@@ -97,6 +101,11 @@ class BandwidthRTC(
     @Volatile
     private var userInitiatedDisconnect = false
     private var reconnectJob: Job? = null
+    private var callStatsTraceJob: Job? = null
+
+    // Previous traced snapshot; lets each trace carry bitrates computed over the trace interval.
+    @Volatile
+    private var lastTracedCallStats: CallStatsSnapshot? = null
 
     @Volatile
     private var micEnabled = true
@@ -304,6 +313,8 @@ class BandwidthRTC(
             return
         }
 
+        startCallStatsTrace()
+
         val readyMetadata = ReadyMetadata(
             endpointId = mediaResult.endpointId,
             deviceId = mediaResult.deviceId
@@ -346,6 +357,7 @@ class BandwidthRTC(
 
     private suspend fun cleanupSession() {
         Logger.info("Cleaning up session...")
+        stopCallStatsTrace()
 
         // 1. Disconnect signaling first to stop incoming SDP offers during teardown
         signaling?.disconnect()
@@ -356,6 +368,40 @@ class BandwidthRTC(
 
         isConnected = false
         hasActiveCall = false
+    }
+
+    private fun startCallStatsTrace() {
+        stopCallStatsTrace()
+        callStatsTraceJob = scope.launch {
+            while (isActive) {
+                delay(CALL_STATS_TRACE_INTERVAL_MS)
+                traceCallStats()
+            }
+        }
+    }
+
+    private fun stopCallStatsTrace() {
+        callStatsTraceJob?.cancel()
+        callStatsTraceJob = null
+        lastTracedCallStats = null
+    }
+
+    private fun traceCallStats() {
+        // Reads the manager directly: the public getCallStats() also fires onRemoteAudioLevel.
+        val pcManager = peerConnectionManager ?: return
+        val previous = lastTracedCallStats
+        try {
+            pcManager.getCallStats(
+                previousInboundBytes = previous?.bytesReceived ?: 0,
+                previousOutboundBytes = previous?.bytesSent ?: 0,
+                previousTimestamp = previous?.timestamp ?: 0.0,
+            ) { snapshot ->
+                lastTracedCallStats = snapshot
+                Logger.debug("Call stats: $snapshot")
+            }
+        } catch (e: Exception) {
+            Logger.warn("Call stats trace failed: ${e.message}")
+        }
     }
 
     /**
