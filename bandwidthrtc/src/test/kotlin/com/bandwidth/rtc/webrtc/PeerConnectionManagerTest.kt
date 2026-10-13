@@ -798,11 +798,13 @@ class PeerConnectionManagerTest {
     }
 
     private fun statsReport(vararg stats: Pair<String, Map<String, Any>>): RTCStatsReport {
-        val map = stats.associate { (type, members) ->
+        // An "id" member becomes the map key; otherwise the index keeps same-type entries distinct.
+        val map = stats.withIndex().associate { (index, entry) ->
+            val (type, members) = entry
             val stat = mockk<RTCStats>()
             every { stat.type } returns type
             every { stat.members } returns members
-            "$type-${members["kind"]}" to stat
+            ((members["id"] as? String) ?: "$type-${members["kind"]}-$index") to stat
         }
         val report = mockk<RTCStatsReport>()
         every { report.statsMap } returns map
@@ -817,6 +819,111 @@ class PeerConnectionManagerTest {
         var snapshot: CallStatsSnapshot? = null
         manager.getCallStats(0, 0, 0.0) { snapshot = it }
         return snapshot!!
+    }
+
+    private fun subscribeSnapshot(report: RTCStatsReport): CallStatsSnapshot {
+        // The factory hands out the publishing PC first, then the subscribing PC.
+        manager.setupPublishingPeerConnection()
+        manager.setupSubscribingPeerConnection()
+        every { mockPublishPc.getStats(any<RTCStatsCollectorCallback>()) } answers {
+            firstArg<RTCStatsCollectorCallback>().onStatsDelivered(statsReport())
+        }
+        every { mockSubscribePc.getStats(any<RTCStatsCollectorCallback>()) } answers {
+            firstArg<RTCStatsCollectorCallback>().onStatsDelivered(report)
+        }
+        var snapshot: CallStatsSnapshot? = null
+        manager.getCallStats(0, 0, 0.0) { snapshot = it }
+        return snapshot!!
+    }
+
+    @Test
+    fun `getCallStats sums inbound audio counters and keeps the highest jitter and audio level`() {
+        val snapshot = subscribeSnapshot(
+            statsReport(
+                "inbound-rtp" to mapOf(
+                    "kind" to "audio", "packetsReceived" to 100L, "packetsLost" to 2L, "bytesReceived" to 8000L,
+                    "jitter" to 0.01, "audioLevel" to 0.2, "codecId" to "codec-1"
+                ),
+                "inbound-rtp" to mapOf(
+                    "kind" to "audio", "packetsReceived" to 50L, "packetsLost" to 3L, "bytesReceived" to 4000L,
+                    "jitter" to 0.03, "audioLevel" to 0.1, "codecId" to "codec-2"
+                ),
+                "codec" to mapOf("id" to "codec-1", "mimeType" to "audio/opus"),
+                "codec" to mapOf("id" to "codec-2", "mimeType" to "audio/PCMU")
+            )
+        )
+
+        assertEquals(150, snapshot.packetsReceived)
+        assertEquals(5, snapshot.packetsLost)
+        assertEquals(12000, snapshot.bytesReceived)
+        assertEquals(0.03, snapshot.jitter, 0.0)
+        assertEquals(0.2, snapshot.audioLevel, 0.0)
+        assertEquals("opus", snapshot.codec)
+    }
+
+    @Test
+    fun `getCallStats sums outbound audio and keeps the highest remote-inbound values`() {
+        val snapshot = publishSnapshot(
+            statsReport(
+                "outbound-rtp" to mapOf("kind" to "audio", "packetsSent" to 10L, "bytesSent" to 800L),
+                "outbound-rtp" to mapOf("kind" to "audio", "packetsSent" to 5L, "bytesSent" to 400L),
+                "remote-inbound-rtp" to mapOf(
+                    "kind" to "audio", "fractionLost" to 0.25, "jitter" to 0.004, "roundTripTime" to 0.08
+                ),
+                "remote-inbound-rtp" to mapOf(
+                    "kind" to "audio", "fractionLost" to 0.1, "jitter" to 0.009, "roundTripTime" to 0.05
+                )
+            )
+        )
+
+        assertEquals(15, snapshot.packetsSent)
+        assertEquals(1200, snapshot.bytesSent)
+        assertEquals(0.25, snapshot.remoteFractionLost, 0.0)
+        assertEquals(0.009, snapshot.remoteJitter, 0.0)
+        assertEquals(0.08, snapshot.rtcpRoundTripTime, 0.0)
+    }
+
+    @Test
+    fun `getCallStats takes roundTripTime from the transport's selected candidate pair`() {
+        val snapshot = subscribeSnapshot(
+            statsReport(
+                "transport" to mapOf("selectedCandidatePairId" to "pair-selected"),
+                "candidate-pair" to mapOf(
+                    "id" to "pair-other", "state" to "succeeded", "nominated" to true, "currentRoundTripTime" to 0.5
+                ),
+                "candidate-pair" to mapOf(
+                    "id" to "pair-selected", "state" to "succeeded", "nominated" to true, "currentRoundTripTime" to 0.04
+                )
+            )
+        )
+
+        assertEquals(0.04, snapshot.roundTripTime, 0.0)
+    }
+
+    @Test
+    fun `getCallStats falls back to a nominated succeeded pair when no pair is selected`() {
+        val snapshot = subscribeSnapshot(
+            statsReport(
+                "candidate-pair" to mapOf(
+                    "id" to "pair-1", "state" to "succeeded", "nominated" to true, "currentRoundTripTime" to 0.06
+                )
+            )
+        )
+
+        assertEquals(0.06, snapshot.roundTripTime, 0.0)
+    }
+
+    @Test
+    fun `getCallStats ignores a succeeded candidate pair that is not nominated`() {
+        val snapshot = subscribeSnapshot(
+            statsReport(
+                "candidate-pair" to mapOf(
+                    "id" to "pair-1", "state" to "succeeded", "nominated" to false, "currentRoundTripTime" to 0.9
+                )
+            )
+        )
+
+        assertEquals(0.0, snapshot.roundTripTime, 0.0)
     }
 
     @Test
