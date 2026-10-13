@@ -12,6 +12,7 @@ import com.bandwidth.rtc.webrtc.PeerConnectionManager
 import com.bandwidth.rtc.webrtc.PeerConnectionManagerInterface
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -19,11 +20,14 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import org.webrtc.PeerConnection
 import java.util.concurrent.CopyOnWriteArrayList
+import kotlin.coroutines.resume
 import kotlin.random.Random
 
 private const val RECONNECT_INITIAL_DELAY_MS = 1_000L
@@ -33,6 +37,10 @@ private const val RECONNECT_MAX_ATTEMPTS = 8
 
 // How often the call stats snapshot is written to the debug log while connected.
 private const val CALL_STATS_TRACE_INTERVAL_MS = 5 * 60 * 1_000L
+
+// A stats read that has not completed by now is reported and dropped. The peer connection can be
+// disposed with a read in flight, in which case its callback never fires.
+private const val CALL_STATS_READ_TIMEOUT_MS = 2_000L
 
 // The only close code the gateway sends to mean "come back on this session". Every other code -
 // including ones this SDK doesn't recognize yet - means retrying cannot succeed.
@@ -102,6 +110,10 @@ class BandwidthRTC(
     private var userInitiatedDisconnect = false
     private var reconnectJob: Job? = null
     private var callStatsTraceJob: Job? = null
+
+    // Overridable so tests need not wait five minutes. Zero or less turns the trace off: under a
+    // virtual-time test scheduler a periodic job never lets advanceUntilIdle() finish.
+    internal var callStatsTraceIntervalMs: Long = CALL_STATS_TRACE_INTERVAL_MS
 
     // Previous traced snapshot; lets each trace carry bitrates computed over the trace interval.
     @Volatile
@@ -357,7 +369,7 @@ class BandwidthRTC(
 
     private suspend fun cleanupSession() {
         Logger.info("Cleaning up session...")
-        stopCallStatsTrace()
+        endCallStatsTrace("session cleanup")
 
         // 1. Disconnect signaling first to stop incoming SDP offers during teardown
         signaling?.disconnect()
@@ -371,11 +383,18 @@ class BandwidthRTC(
     }
 
     private fun startCallStatsTrace() {
+        // Each session starts a fresh trace: no job or baseline carries over from an earlier one
         stopCallStatsTrace()
+        val intervalMs = callStatsTraceIntervalMs
+        if (intervalMs <= 0) return
         callStatsTraceJob = scope.launch {
             while (isActive) {
-                delay(CALL_STATS_TRACE_INTERVAL_MS)
-                traceCallStats()
+                delay(intervalMs)
+                val snapshot = traceCallStats("Call stats", peerConnectionManager, lastTracedCallStats)
+                // The trace ended while the read was in flight: the result belongs to an earlier session
+                if (snapshot != null && isActive) {
+                    lastTracedCallStats = snapshot
+                }
             }
         }
     }
@@ -386,22 +405,57 @@ class BandwidthRTC(
         lastTracedCallStats = null
     }
 
-    private fun traceCallStats() {
-        // Reads the manager directly: the public getCallStats() also fires onRemoteAudioLevel.
-        val pcManager = peerConnectionManager ?: return
-        val previous = lastTracedCallStats
-        try {
-            pcManager.getCallStats(
-                previousInboundBytes = previous?.bytesReceived ?: 0,
-                previousOutboundBytes = previous?.bytesSent ?: 0,
-                previousTimestamp = previous?.timestamp ?: 0.0,
-            ) { snapshot ->
-                lastTracedCallStats = snapshot
-                Logger.debug("Call stats: $snapshot")
-            }
-        } catch (e: Exception) {
-            Logger.warn("Call stats trace failed: ${e.message}")
+    /**
+     * Logs one last snapshot and stops the trace. No-op when no trace is running, so every path that
+     * ends a session can call it. Call it before the media is released: the read is registered
+     * here, and its result is logged when it arrives.
+     */
+    private fun endCallStatsTrace(reason: String) {
+        if (callStatsTraceJob == null) return
+        val baseline = lastTracedCallStats
+        val pcManager = peerConnectionManager
+        stopCallStatsTrace()
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            traceCallStats("Final call stats ($reason)", pcManager, baseline)
         }
+    }
+
+    /**
+     * Reads and logs one snapshot. Returns it only when the read completed, so a failed or timed-out
+     * read is reported rather than logged as zeros and never becomes a bitrate baseline.
+     */
+    private suspend fun traceCallStats(
+        label: String,
+        pcManager: PeerConnectionManagerInterface?,
+        baseline: CallStatsSnapshot?,
+    ): CallStatsSnapshot? {
+        // Reads the manager directly: the public getCallStats() also fires onRemoteAudioLevel.
+        if (pcManager == null) {
+            Logger.debug("$label skipped: no peer connection manager")
+            return null
+        }
+        val snapshot = try {
+            withTimeoutOrNull(CALL_STATS_READ_TIMEOUT_MS) {
+                suspendCancellableCoroutine<CallStatsSnapshot> { continuation ->
+                    pcManager.getCallStats(
+                        previousInboundBytes = baseline?.bytesReceived ?: 0,
+                        previousOutboundBytes = baseline?.bytesSent ?: 0,
+                        previousTimestamp = baseline?.timestamp ?: 0.0,
+                    ) { if (continuation.isActive) continuation.resume(it) }
+                }
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Logger.warn("$label failed: ${e.message}")
+            return null
+        }
+        if (snapshot == null) {
+            Logger.warn("$label timed out after ${CALL_STATS_READ_TIMEOUT_MS}ms")
+            return null
+        }
+        Logger.debug("$label: $snapshot")
+        return snapshot
     }
 
     /**
@@ -659,6 +713,7 @@ class BandwidthRTC(
 
             // The peer connections belong to the session that just died. Release them here or they
             // dangle for the lifetime of the instance and pile up across reconnects.
+            endCallStatsTrace("socket closed")
             releaseMedia()
             this.signaling = null
 
