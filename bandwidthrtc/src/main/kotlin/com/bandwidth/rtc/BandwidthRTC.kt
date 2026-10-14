@@ -140,6 +140,11 @@ class BandwidthRTC(
     // Own baseline, separate from lastTracedCallStats, so each trace's bitrates span its own interval.
     private var lastInCallTracedStats: CallStatsSnapshot? = null
 
+    // Snapshot read just before the latest subscribe re-offer was applied. The gateway ends a call
+    // with a re-offer that removes its track, so by the time the call's stream is reported gone the
+    // inbound stats are too. Logged as the final snapshot when the call ends.
+    private var preOfferInCallStats: CallStatsSnapshot? = null
+
     // Collects SDK logs for the gateway. Shared by every signaling client this instance creates, so
     // logs written while a reconnect is pending are not lost with the dead client.
     private val diagnosticsBatcher = DiagnosticsBatcher()
@@ -460,7 +465,7 @@ class BandwidthRTC(
     private fun onCallStreamUnavailable(streamId: String) {
         synchronized(inCallTraceLock) {
             if (activeCallStreamIds.remove(streamId) && activeCallStreamIds.isEmpty()) {
-                endInCallStatsTrace("call ended")
+                endInCallStatsTrace("call ended", useStashedStats = true)
             }
         }
     }
@@ -490,19 +495,47 @@ class BandwidthRTC(
 
     /**
      * Same contract as [endCallStatsTrace], for the in-call trace. Also forgets the active call
-     * streams, so it must run before the peer connections that carried them are replaced.
+     * streams, so it must run before the peer connections that carried them are replaced. With
+     * [useStashedStats], logs the snapshot taken before the last subscribe re-offer instead of a
+     * fresh read, falling back to the read when there is none.
      */
-    private fun endInCallStatsTrace(reason: String) {
+    private fun endInCallStatsTrace(reason: String, useStashedStats: Boolean = false) {
         synchronized(inCallTraceLock) {
             activeCallStreamIds.clear()
+            val stashed = if (useStashedStats) preOfferInCallStats else null
+            preOfferInCallStats = null
             val job = inCallStatsTraceJob ?: return
             val baseline = lastInCallTracedStats
             val pcManager = peerConnectionManager
             job.cancel()
             inCallStatsTraceJob = null
             lastInCallTracedStats = null
+            if (stashed != null) {
+                Logger.debug("Final in-call stats ($reason): $stashed")
+                return
+            }
             scope.launch(start = CoroutineStart.UNDISPATCHED) {
                 traceCallStats("Final in-call stats ($reason)", pcManager, baseline)
+            }
+        }
+    }
+
+    /**
+     * Called before a subscribe re-offer is applied. While the in-call trace runs, reads a snapshot
+     * and keeps it only if it completed, so a failed read never replaces an earlier good one.
+     */
+    private suspend fun stashInCallStatsBeforeOffer(pcManager: PeerConnectionManagerInterface) {
+        val job: Job
+        val baseline: CallStatsSnapshot?
+        synchronized(inCallTraceLock) {
+            job = inCallStatsTraceJob ?: return
+            baseline = lastInCallTracedStats
+        }
+        val snapshot = traceCallStats("Pre-offer in-call stats", pcManager, baseline) ?: return
+        // Dropped if the trace ended or restarted while the read was in flight
+        synchronized(inCallTraceLock) {
+            if (inCallStatsTraceJob === job) {
+                preOfferInCallStats = snapshot
             }
         }
     }
@@ -1009,6 +1042,8 @@ class BandwidthRTC(
 
         try {
             Logger.debug("Subscribe SDP offer: revision=${notification.sdpRevision}, peerType=${notification.peerType}, endpointId=${notification.endpointId}")
+
+            stashInCallStatsBeforeOffer(pcManager)
 
             val answerSdp = pcManager.handleSubscribeSdpOffer(
                 sdpOffer = notification.sdpOffer,
