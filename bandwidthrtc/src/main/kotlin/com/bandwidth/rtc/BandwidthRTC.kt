@@ -2,6 +2,7 @@ package com.bandwidth.rtc
 
 import android.content.Context
 import com.bandwidth.rtc.media.MixingAudioDevice
+import com.bandwidth.rtc.signaling.DiagnosticsBatcher
 import com.bandwidth.rtc.signaling.SignalingClient
 import com.bandwidth.rtc.signaling.SignalingClientInterface
 import com.bandwidth.rtc.signaling.rpc.SDPOfferNotification
@@ -37,6 +38,12 @@ private const val RECONNECT_MAX_ATTEMPTS = 8
 
 // How often the call stats snapshot is written to the debug log while connected.
 private const val CALL_STATS_TRACE_INTERVAL_MS = 5 * 60 * 1_000L
+
+/**
+ * How often the call stats snapshot is written to the debug log while a call stream is active. It
+ * runs independently of the 5-minute trace, so both may log at the same moment.
+ */
+private const val IN_CALL_STATS_TRACE_INTERVAL_MS = 10_000L
 
 // A stats read that has not completed by now is reported and dropped. The peer connection can be
 // disposed with a read in flight, in which case its callback never fires.
@@ -118,6 +125,24 @@ class BandwidthRTC(
     // Previous traced snapshot; lets each trace carry bitrates computed over the trace interval.
     @Volatile
     private var lastTracedCallStats: CallStatsSnapshot? = null
+
+    // Guards the in-call trace state below: stream callbacks arrive on WebRTC threads while
+    // teardown runs on the app's thread or the websocket's.
+    private val inCallTraceLock = Any()
+
+    // Stream ids of the active calls; the in-call trace runs while this is non-empty.
+    private val activeCallStreamIds = HashSet<String>()
+    private var inCallStatsTraceJob: Job? = null
+
+    // Overridable so tests need not wait ten seconds. Zero or less turns the trace off.
+    internal var inCallStatsTraceIntervalMs: Long = IN_CALL_STATS_TRACE_INTERVAL_MS
+
+    // Own baseline, separate from lastTracedCallStats, so each trace's bitrates span its own interval.
+    private var lastInCallTracedStats: CallStatsSnapshot? = null
+
+    // Collects SDK logs for the gateway. Shared by every signaling client this instance creates, so
+    // logs written while a reconnect is pending are not lost with the dead client.
+    private val diagnosticsBatcher = DiagnosticsBatcher()
 
     @Volatile
     private var micEnabled = true
@@ -207,6 +232,7 @@ class BandwidthRTC(
         this.options = options
         userInitiatedDisconnect = false
 
+        diagnosticsBatcher.start()
         try {
             establishSession()
         } catch (e: Exception) {
@@ -231,12 +257,18 @@ class BandwidthRTC(
 
         val sig: SignalingClientInterface = signaling
             ?: injectedSignaling?.also { signaling = it }
-            ?: SignalingClient().also { signaling = it }
+            ?: SignalingClient(diagnostics = diagnosticsBatcher).also { signaling = it }
 
         registerEventHandlers(sig)
 
         Logger.info("Connecting signaling...")
         sig.connect(authParams = authParams, options = options)
+
+        if (isReconnectAttempt) {
+            // The peer connections are rebuilt below and the old call streams never fire
+            // onStreamUnavailable, so end their trace while the old connections can still be read
+            endInCallStatsTrace("reconnect")
+        }
 
         val existingPCMgr = peerConnectionManager ?: injectedPeerConnectionManager?.also { peerConnectionManager = it }
         val pcMgr: PeerConnectionManagerInterface
@@ -274,10 +306,12 @@ class BandwidthRTC(
                 tags = metadata?.tags
             )
             Logger.info("onStreamAvailable: ${rtcStream.streamId}")
+            onCallStreamAvailable(rtcStream.streamId)
             safeCallback("onStreamAvailable") { onStreamAvailable?.invoke(rtcStream) }
         }
         pcMgr.onStreamUnavailable = { streamId ->
             Logger.info("onStreamUnavailable: $streamId")
+            onCallStreamUnavailable(streamId)
             safeCallback("onStreamUnavailable") { onStreamUnavailable?.invoke(streamId) }
         }
         pcMgr.onDtmfSent = { event -> safeCallback("onDtmfSent") { onDtmfSent?.invoke(event) } }
@@ -369,11 +403,13 @@ class BandwidthRTC(
 
     private suspend fun cleanupSession() {
         Logger.info("Cleaning up session...")
-        endCallStatsTrace("session cleanup")
+        endCallStatsTraces("session cleanup")
 
-        // 1. Disconnect signaling first to stop incoming SDP offers during teardown
+        // 1. Disconnect signaling first to stop incoming SDP offers during teardown. It sends the
+        // final diagnostics batch before closing the socket.
         signaling?.disconnect()
         signaling = null
+        diagnosticsBatcher.stop()
 
         // 2. Clean up peer connections and the audio device they use
         releaseMedia()
@@ -403,6 +439,72 @@ class BandwidthRTC(
         callStatsTraceJob?.cancel()
         callStatsTraceJob = null
         lastTracedCallStats = null
+    }
+
+    /** Ends both traces. Call it before the media is released, see [endCallStatsTrace]. */
+    private fun endCallStatsTraces(reason: String) {
+        endCallStatsTrace(reason)
+        endInCallStatsTrace(reason)
+    }
+
+    private fun onCallStreamAvailable(streamId: String) {
+        synchronized(inCallTraceLock) {
+            val wasIdle = activeCallStreamIds.isEmpty()
+            activeCallStreamIds.add(streamId)
+            if (wasIdle) {
+                startInCallStatsTrace()
+            }
+        }
+    }
+
+    private fun onCallStreamUnavailable(streamId: String) {
+        synchronized(inCallTraceLock) {
+            if (activeCallStreamIds.remove(streamId) && activeCallStreamIds.isEmpty()) {
+                endInCallStatsTrace("call ended")
+            }
+        }
+    }
+
+    // Only called on the idle to in-call transition, so no job or baseline is left to reset
+    private fun startInCallStatsTrace() {
+        val intervalMs = inCallStatsTraceIntervalMs
+        if (intervalMs <= 0) {
+            return
+        }
+        synchronized(inCallTraceLock) {
+            inCallStatsTraceJob = scope.launch {
+                while (isActive) {
+                    delay(intervalMs)
+                    val snapshot = traceCallStats("In-call stats", peerConnectionManager, lastInCallTracedStats)
+                    // Checked under the lock so a trace that ended while the read was in flight
+                    // cannot leave its result behind as the next call's baseline
+                    synchronized(inCallTraceLock) {
+                        if (snapshot != null && isActive) {
+                            lastInCallTracedStats = snapshot
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Same contract as [endCallStatsTrace], for the in-call trace. Also forgets the active call
+     * streams, so it must run before the peer connections that carried them are replaced.
+     */
+    private fun endInCallStatsTrace(reason: String) {
+        synchronized(inCallTraceLock) {
+            activeCallStreamIds.clear()
+            val job = inCallStatsTraceJob ?: return
+            val baseline = lastInCallTracedStats
+            val pcManager = peerConnectionManager
+            job.cancel()
+            inCallStatsTraceJob = null
+            lastInCallTracedStats = null
+            scope.launch(start = CoroutineStart.UNDISPATCHED) {
+                traceCallStats("Final in-call stats ($reason)", pcManager, baseline)
+            }
+        }
     }
 
     /**
@@ -713,7 +815,7 @@ class BandwidthRTC(
 
             // The peer connections belong to the session that just died. Release them here or they
             // dangle for the lifetime of the instance and pile up across reconnects.
-            endCallStatsTrace("socket closed")
+            endCallStatsTraces("socket closed")
             releaseMedia()
             this.signaling = null
 
@@ -728,6 +830,7 @@ class BandwidthRTC(
                 // no close frame at all, or any other/unknown code - means retrying this session
                 // cannot succeed. Tear down for good instead of quietly retrying forever.
                 Logger.error("Non-retryable close code $closeCode - not reconnecting")
+                diagnosticsBatcher.stop()
                 reconnectJob?.cancel()
                 reconnectJob = null
                 scope.launch { runCatching { deadSignaling.disconnect() } }
@@ -790,6 +893,7 @@ class BandwidthRTC(
         }
 
         Logger.error("Reconnect gave up - session is dead")
+        diagnosticsBatcher.stop()
 
         if (userInitiatedDisconnect) {
             // Cancellation can only be observed at a cancellable suspension point, and there
@@ -817,6 +921,8 @@ class BandwidthRTC(
 
     /** Tears down a half-built session so the next reconnect attempt starts from nothing. */
     private suspend fun discardSession() {
+        // The old call streams die with the peer connections released below
+        endInCallStatsTrace("reconnect")
         runCatching { signaling?.disconnect() }
         signaling = null
         releaseMedia()

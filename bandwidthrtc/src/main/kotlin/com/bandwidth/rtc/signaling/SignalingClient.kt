@@ -23,13 +23,17 @@ private const val SDK_VERSION = "0.1.0"
 
 private const val PING_INTERVAL_MS = 60_000L
 
+private const val DIAGNOSTICS_FLUSH_INTERVAL_MS = 5 * 60 * 1_000L
+
 // OkHttp's onFailure gives no close code (no close frame was ever received), so this synthesizes
 // the code browsers/rpc-websockets use for the same case, keeping this SDK's "close" event
 // consistent for callers regardless of which failure path produced it.
 private const val CLOSE_CODE_ABNORMAL = 1006
 
 internal class SignalingClient(
-    private val webSocketFactory: () -> WebSocketInterface = { OkHttpWebSocket() }
+    private val webSocketFactory: () -> WebSocketInterface = { OkHttpWebSocket() },
+    // Owned by the caller so buffered logs survive this client being replaced on a reconnect
+    private val diagnostics: DiagnosticsBatcher? = null
 ) : SignalingClientInterface {
 
     private val log = Logger
@@ -43,6 +47,9 @@ internal class SignalingClient(
     private var nextRequestId = 1
 
     private val eventHandlers = ConcurrentHashMap<String, (String) -> Unit>()
+
+    // Overridable so tests need not wait five minutes
+    internal var diagnosticsFlushIntervalMs: Long = DIAGNOSTICS_FLUSH_INTERVAL_MS
 
     var isConnected = false
         private set
@@ -111,6 +118,7 @@ internal class SignalingClient(
         }
 
         startPingLoop()
+        startDiagnosticsLoop()
         log.info("SignalingClient connected and ping loop started")
     }
 
@@ -122,6 +130,11 @@ internal class SignalingClient(
             log.debug("Leave notification sent")
         } catch (e: Exception) {
             log.warn("Failed to send leave notification: ${e.message}")
+        }
+
+        // The final batch goes out while the socket is still open
+        if (isConnected) {
+            diagnostics?.flush(::sendDiagnostics)
         }
 
         pingJob?.cancel()
@@ -234,16 +247,20 @@ internal class SignalingClient(
         }
     }
 
-    private fun sendNotification(method: String, params: JsonElement) {
-        val ws = webSocket ?: return
-        if (!isConnected) return
+    /** Returns whether the message was handed to the socket. */
+    private fun sendNotification(method: String, params: JsonElement): Boolean {
+        val ws = webSocket ?: return false
+        if (!isConnected) return false
 
         val notification = JsonRpcNotification(method = method, params = params)
         val message = json.encodeToString(notification)
 
         log.debug(">>> RPC notify: $method")
-        ws.send(message)
+        return ws.send(message)
     }
+
+    private fun sendDiagnostics(logs: List<DiagnosticsLogEntry>): Boolean =
+        sendNotification("deviceDiagnostics", json.encodeToJsonElement(DeviceDiagnosticsParams(logs = logs)))
 
     @Synchronized
     private fun generateRequestId(): String {
@@ -338,6 +355,17 @@ internal class SignalingClient(
 
         if (wasConnected) {
             eventHandlers["close"]?.invoke(closeCode.toString())
+        }
+    }
+
+    private fun startDiagnosticsLoop() {
+        val batcher = diagnostics ?: return
+        val intervalMs = diagnosticsFlushIntervalMs
+        scope?.launch {
+            while (isActive) {
+                delay(intervalMs)
+                batcher.flush(::sendDiagnostics)
+            }
         }
     }
 
