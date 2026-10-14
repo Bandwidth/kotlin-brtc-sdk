@@ -633,25 +633,37 @@ class PeerConnectionManager(
                 synchronized(lock) { pendingCount++ }
                 subPC.getStats(RTCStatsCollectorCallback { report ->
                     var codecId: String? = null
+                    var selectedPairId: String? = null
+                    var fallbackPair: RTCStats? = null
                     for ((_, stat) in report.statsMap) {
                         if (stat.type == "inbound-rtp") {
                             val kind = stat.members["kind"] as? String
                             if (kind == "audio") {
-                                snapshot.packetsReceived = (stat.members["packetsReceived"] as? Number)?.toInt() ?: 0
-                                snapshot.packetsLost = (stat.members["packetsLost"] as? Number)?.toInt() ?: 0
-                                snapshot.bytesReceived = (stat.members["bytesReceived"] as? Number)?.toInt() ?: 0
-                                snapshot.jitter = (stat.members["jitter"] as? Number)?.toDouble() ?: 0.0
-                                snapshot.audioLevel = (stat.members["audioLevel"] as? Number)?.toDouble() ?: 0.0
-                                codecId = stat.members["codecId"] as? String
+                                // With several audio streams (e.g. a conference), counters are summed
+                                // and quality fields keep the highest value.
+                                snapshot.packetsReceived += (stat.members["packetsReceived"] as? Number)?.toInt() ?: 0
+                                snapshot.packetsLost += (stat.members["packetsLost"] as? Number)?.toInt() ?: 0
+                                snapshot.bytesReceived += (stat.members["bytesReceived"] as? Number)?.toInt() ?: 0
+                                snapshot.jitter = maxOf(snapshot.jitter, (stat.members["jitter"] as? Number)?.toDouble() ?: 0.0)
+                                snapshot.audioLevel = maxOf(snapshot.audioLevel, (stat.members["audioLevel"] as? Number)?.toDouble() ?: 0.0)
+                                if (codecId == null) {
+                                    codecId = stat.members["codecId"] as? String
+                                }
                             }
+                        }
+                        if (stat.type == "transport") {
+                            selectedPairId = stat.members["selectedCandidatePairId"] as? String
                         }
                         if (stat.type == "candidate-pair") {
                             val state = stat.members["state"] as? String
-                            if (state == "succeeded") {
-                                snapshot.roundTripTime = (stat.members["currentRoundTripTime"] as? Number)?.toDouble() ?: 0.0
+                            if (stat.members["nominated"] == true && state == "succeeded") {
+                                fallbackPair = stat
                             }
                         }
                     }
+                    // Prefer the transport's selected pair; fall back to a nominated, succeeded one.
+                    val activePair = selectedPairId?.let { report.statsMap[it] } ?: fallbackPair
+                    snapshot.roundTripTime = (activePair?.members?.get("currentRoundTripTime") as? Number)?.toDouble() ?: 0.0
                     if (codecId != null) {
                         val codecStat = report.statsMap[codecId]
                         if (codecStat != null) {
@@ -673,8 +685,17 @@ class PeerConnectionManager(
                         if (stat.type == "outbound-rtp") {
                             val kind = stat.members["kind"] as? String
                             if (kind == "audio") {
-                                snapshot.packetsSent = (stat.members["packetsSent"] as? Number)?.toInt() ?: 0
-                                snapshot.bytesSent = (stat.members["bytesSent"] as? Number)?.toInt() ?: 0
+                                snapshot.packetsSent += (stat.members["packetsSent"] as? Number)?.toInt() ?: 0
+                                snapshot.bytesSent += (stat.members["bytesSent"] as? Number)?.toInt() ?: 0
+                            }
+                        }
+                        // Remote receiver's RTCP report on our outbound stream.
+                        if (stat.type == "remote-inbound-rtp") {
+                            val kind = stat.members["kind"] as? String
+                            if (kind == "audio") {
+                                snapshot.remoteFractionLost = maxOf(snapshot.remoteFractionLost, (stat.members["fractionLost"] as? Number)?.toDouble() ?: 0.0)
+                                snapshot.remoteJitter = maxOf(snapshot.remoteJitter, (stat.members["jitter"] as? Number)?.toDouble() ?: 0.0)
+                                snapshot.rtcpRoundTripTime = maxOf(snapshot.rtcpRoundTripTime, (stat.members["roundTripTime"] as? Number)?.toDouble() ?: 0.0)
                             }
                         }
                     }

@@ -179,6 +179,7 @@ class BandwidthRTCReconnectTest {
         coEvery { sig.setMediaPreferences() } returns SetMediaPreferencesResult()
 
         val brtc = BandwidthRTC(context = ctx, signaling = sig, peerConnectionManager = pcm, scope = scope)
+        brtc.callStatsTraceIntervalMs = 0
         brtc.connect(authParams)
 
         var reported: Throwable? = null
@@ -364,7 +365,10 @@ class BandwidthRTCReconnectTest {
             signaling = mockSignaling,
             peerConnectionManager = mockPCManager,
             scope = scope
-        )
+        ).also {
+            // A periodic trace would keep advanceUntilIdle() and runTest from ever finishing
+            it.callStatsTraceIntervalMs = 0
+        }
     }
 
     private fun buildMockMediaStream(id: String): MediaStream {

@@ -217,6 +217,8 @@ Delivered to `onReady`.
 
 Returned asynchronously by `getCallStats()`. Delta bitrates require passing the previous snapshot.
 
+A field that is not reported yet is `0`, so `0` does not always mean a perfect value. The RTCP fields (`remoteFractionLost`, `remoteJitter`, `rtcpRoundTripTime`) stay `0` until the first receiver report arrives. With several audio streams (e.g. a conference), packet and byte counts are summed, and jitter, loss, RTT and audio level show the highest stream.
+
 | Property | Description |
 |---|---|
 | `packetsReceived` | Inbound RTP packets received |
