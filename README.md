@@ -323,6 +323,14 @@ Log levels: `OFF`, `ERROR`, `WARN` (default), `INFO`, `DEBUG`, `TRACE`.
 
 All log output appears in `logcat` under the tag **`BRTC`**.
 
+### Call stats trace
+
+While connected, a `getCallStats` snapshot is written to the debug log every 5 minutes, and a final one when the session ends. While a call stream is active, a snapshot is also logged every 10 seconds under "In-call stats", with a final one when the call ends. The two traces run independently and may log at the same moment.
+
+### Diagnostics sent to Bandwidth
+
+The SDK sends its own log lines to Bandwidth as `deviceDiagnostics` notifications to help support troubleshoot calls. Every line is included at all levels, whatever log level you configured, and the log level does not change what is sent. Logs are sent in batches every 5 minutes while connected, and the remaining batch is sent when you call `disconnect()`. Up to 5,000 recent lines are kept while the connection is down. Whether Bandwidth stores them is decided per account on the server, so no SDK setting is needed.
+
 ---
 
 ## Common Pitfalls
