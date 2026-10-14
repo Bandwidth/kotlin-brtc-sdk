@@ -955,6 +955,86 @@ class PeerConnectionManagerTest {
         assertEquals(0.0, snapshot.rtcpRoundTripTime, 0.0)
     }
 
+    private fun bothPeersSnapshot(publishReport: RTCStatsReport, subscribeReport: RTCStatsReport): CallStatsSnapshot {
+        manager.setupPublishingPeerConnection()
+        manager.setupSubscribingPeerConnection()
+        every { mockPublishPc.getStats(any<RTCStatsCollectorCallback>()) } answers {
+            firstArg<RTCStatsCollectorCallback>().onStatsDelivered(publishReport)
+        }
+        every { mockSubscribePc.getStats(any<RTCStatsCollectorCallback>()) } answers {
+            firstArg<RTCStatsCollectorCallback>().onStatsDelivered(subscribeReport)
+        }
+        var snapshot: CallStatsSnapshot? = null
+        manager.getCallStats(0, 0, 0.0) { snapshot = it }
+        return snapshot!!
+    }
+
+    @Test
+    fun `getCallStats keeps per-peer counters separate in both directions`() {
+        val snapshot = bothPeersSnapshot(
+            publishReport = statsReport(
+                "outbound-rtp" to mapOf("kind" to "audio", "packetsSent" to 10L, "bytesSent" to 800L),
+                "outbound-rtp" to mapOf("kind" to "audio", "packetsSent" to 5L, "bytesSent" to 400L),
+                "inbound-rtp" to mapOf("kind" to "audio", "packetsReceived" to 3L, "bytesReceived" to 240L)
+            ),
+            subscribeReport = statsReport(
+                "inbound-rtp" to mapOf("kind" to "audio", "packetsReceived" to 100L, "bytesReceived" to 8000L),
+                "inbound-rtp" to mapOf("kind" to "audio", "packetsReceived" to 50L, "bytesReceived" to 4000L),
+                "outbound-rtp" to mapOf("kind" to "audio", "packetsSent" to 7L, "bytesSent" to 560L)
+            )
+        )
+
+        assertEquals(PeerCallStats(packetsSent = 15, bytesSent = 1200, packetsReceived = 3, bytesReceived = 240), snapshot.publishPeer)
+        assertEquals(PeerCallStats(packetsSent = 7, bytesSent = 560, packetsReceived = 150, bytesReceived = 12000), snapshot.subscribePeer)
+    }
+
+    @Test
+    fun `getCallStats leaves flat fields unchanged when per-peer counters are filled`() {
+        val snapshot = bothPeersSnapshot(
+            publishReport = statsReport(
+                "outbound-rtp" to mapOf("kind" to "audio", "packetsSent" to 15L, "bytesSent" to 1200L),
+                "inbound-rtp" to mapOf("kind" to "audio", "packetsReceived" to 3L, "bytesReceived" to 240L)
+            ),
+            subscribeReport = statsReport(
+                "inbound-rtp" to mapOf("kind" to "audio", "packetsReceived" to 150L, "bytesReceived" to 12000L),
+                "outbound-rtp" to mapOf("kind" to "audio", "packetsSent" to 7L, "bytesSent" to 560L)
+            )
+        )
+
+        // The flat fields still read inbound from the subscribe PC and outbound from the publish PC.
+        assertEquals(150, snapshot.packetsReceived)
+        assertEquals(12000, snapshot.bytesReceived)
+        assertEquals(15, snapshot.packetsSent)
+        assertEquals(1200, snapshot.bytesSent)
+    }
+
+    @Test
+    fun `getCallStats ignores non-audio RTP in per-peer counters`() {
+        val snapshot = bothPeersSnapshot(
+            publishReport = statsReport(
+                "outbound-rtp" to mapOf("kind" to "video", "packetsSent" to 99L, "bytesSent" to 9900L),
+                "inbound-rtp" to mapOf("kind" to "video", "packetsReceived" to 99L, "bytesReceived" to 9900L)
+            ),
+            subscribeReport = statsReport(
+                "inbound-rtp" to mapOf("kind" to "video", "packetsReceived" to 99L, "bytesReceived" to 9900L),
+                "outbound-rtp" to mapOf("kind" to "video", "packetsSent" to 99L, "bytesSent" to 9900L)
+            )
+        )
+
+        assertEquals(PeerCallStats(), snapshot.publishPeer)
+        assertEquals(PeerCallStats(), snapshot.subscribePeer)
+    }
+
+    @Test
+    fun `getCallStats reports zero per-peer counters for a peer connection that is not set up`() {
+        val snapshot = publishSnapshot(
+            statsReport("outbound-rtp" to mapOf("kind" to "audio", "packetsSent" to 10L, "bytesSent" to 800L))
+        )
+
+        assertEquals(PeerCallStats(packetsSent = 10, bytesSent = 800), snapshot.publishPeer)
+        assertEquals(PeerCallStats(), snapshot.subscribePeer)
+    }
+
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------

@@ -233,6 +233,10 @@ A field that is not reported yet is `0`, so `0` does not always mean a perfect v
 | `inboundBitrate` | Derived inbound bitrate (bps) |
 | `outboundBitrate` | Derived outbound bitrate (bps) |
 | `timestamp` | Snapshot timestamp |
+| `publishPeer` | `PeerCallStats` from the peer connection that sends local media |
+| `subscribePeer` | `PeerCallStats` from the peer connection that receives remote media |
+
+`PeerCallStats` holds the audio RTP `packetsSent`, `bytesSent`, `packetsReceived` and `bytesReceived` that one peer connection reported. The direction a peer connection does not use is normally `0`. The flat fields above are unchanged.
 
 ---
 

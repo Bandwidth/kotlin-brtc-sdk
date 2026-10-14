@@ -632,6 +632,10 @@ class PeerConnectionManager(
             if (subPC != null) {
                 synchronized(lock) { pendingCount++ }
                 subPC.getStats(RTCStatsCollectorCallback { report ->
+                    var peerPacketsReceived = 0
+                    var peerBytesReceived = 0
+                    var peerPacketsSent = 0
+                    var peerBytesSent = 0
                     var codecId: String? = null
                     var selectedPairId: String? = null
                     var fallbackPair: RTCStats? = null
@@ -641,15 +645,23 @@ class PeerConnectionManager(
                             if (kind == "audio") {
                                 // With several audio streams (e.g. a conference), counters are summed
                                 // and quality fields keep the highest value.
-                                snapshot.packetsReceived += (stat.members["packetsReceived"] as? Number)?.toInt() ?: 0
+                                val packets = (stat.members["packetsReceived"] as? Number)?.toInt() ?: 0
+                                val bytes = (stat.members["bytesReceived"] as? Number)?.toInt() ?: 0
+                                snapshot.packetsReceived += packets
                                 snapshot.packetsLost += (stat.members["packetsLost"] as? Number)?.toInt() ?: 0
-                                snapshot.bytesReceived += (stat.members["bytesReceived"] as? Number)?.toInt() ?: 0
+                                snapshot.bytesReceived += bytes
+                                peerPacketsReceived += packets
+                                peerBytesReceived += bytes
                                 snapshot.jitter = maxOf(snapshot.jitter, (stat.members["jitter"] as? Number)?.toDouble() ?: 0.0)
                                 snapshot.audioLevel = maxOf(snapshot.audioLevel, (stat.members["audioLevel"] as? Number)?.toDouble() ?: 0.0)
                                 if (codecId == null) {
                                     codecId = stat.members["codecId"] as? String
                                 }
                             }
+                        }
+                        if (stat.type == "outbound-rtp" && stat.members["kind"] == "audio") {
+                            peerPacketsSent += (stat.members["packetsSent"] as? Number)?.toInt() ?: 0
+                            peerBytesSent += (stat.members["bytesSent"] as? Number)?.toInt() ?: 0
                         }
                         if (stat.type == "transport") {
                             selectedPairId = stat.members["selectedCandidatePairId"] as? String
@@ -673,6 +685,12 @@ class PeerConnectionManager(
                             }
                         }
                     }
+                    snapshot.subscribePeer = PeerCallStats(
+                        packetsSent = peerPacketsSent,
+                        bytesSent = peerBytesSent,
+                        packetsReceived = peerPacketsReceived,
+                        bytesReceived = peerBytesReceived
+                    )
                     checkDone()
                 })
             }
@@ -681,13 +699,25 @@ class PeerConnectionManager(
             if (pubPC != null) {
                 synchronized(lock) { pendingCount++ }
                 pubPC.getStats(RTCStatsCollectorCallback { report ->
+                    var peerPacketsSent = 0
+                    var peerBytesSent = 0
+                    var peerPacketsReceived = 0
+                    var peerBytesReceived = 0
                     for ((_, stat) in report.statsMap) {
                         if (stat.type == "outbound-rtp") {
                             val kind = stat.members["kind"] as? String
                             if (kind == "audio") {
-                                snapshot.packetsSent += (stat.members["packetsSent"] as? Number)?.toInt() ?: 0
-                                snapshot.bytesSent += (stat.members["bytesSent"] as? Number)?.toInt() ?: 0
+                                val packets = (stat.members["packetsSent"] as? Number)?.toInt() ?: 0
+                                val bytes = (stat.members["bytesSent"] as? Number)?.toInt() ?: 0
+                                snapshot.packetsSent += packets
+                                snapshot.bytesSent += bytes
+                                peerPacketsSent += packets
+                                peerBytesSent += bytes
                             }
+                        }
+                        if (stat.type == "inbound-rtp" && stat.members["kind"] == "audio") {
+                            peerPacketsReceived += (stat.members["packetsReceived"] as? Number)?.toInt() ?: 0
+                            peerBytesReceived += (stat.members["bytesReceived"] as? Number)?.toInt() ?: 0
                         }
                         // Remote receiver's RTCP report on our outbound stream.
                         if (stat.type == "remote-inbound-rtp") {
@@ -699,6 +729,12 @@ class PeerConnectionManager(
                             }
                         }
                     }
+                    snapshot.publishPeer = PeerCallStats(
+                        packetsSent = peerPacketsSent,
+                        bytesSent = peerBytesSent,
+                        packetsReceived = peerPacketsReceived,
+                        bytesReceived = peerBytesReceived
+                    )
                     checkDone()
                 })
             }
