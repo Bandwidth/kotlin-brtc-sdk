@@ -33,7 +33,12 @@ private const val CLOSE_CODE_ABNORMAL = 1006
 internal class SignalingClient(
     private val webSocketFactory: () -> WebSocketInterface = { OkHttpWebSocket() },
     // Owned by the caller so buffered logs survive this client being replaced on a reconnect
-    private val diagnostics: DiagnosticsBatcher? = null
+    private val diagnostics: DiagnosticsBatcher? = null,
+    // Sent as the `uniqueId` query param on every connect(). It identifies this SDK instance to the
+    // gateway, so it must not change between connects. BandwidthRTC creates a new SignalingClient
+    // for each reconnect and therefore passes its own per-instance id in; the default only covers
+    // a client used standalone, where it is still generated once per client rather than per connect.
+    private val uniqueId: String = UUID.randomUUID().toString()
 ) : SignalingClientInterface {
 
     private val log = Logger
@@ -59,7 +64,6 @@ internal class SignalingClient(
         if (isConnected) throw BandwidthRTCError.AlreadyConnected()
 
         val baseUrl = options?.websocketUrl ?: DEFAULT_GATEWAY_URL
-        val uniqueId = UUID.randomUUID().toString()
 
         val separator = if (baseUrl.contains("?")) "&" else "?"
         val url = buildString {

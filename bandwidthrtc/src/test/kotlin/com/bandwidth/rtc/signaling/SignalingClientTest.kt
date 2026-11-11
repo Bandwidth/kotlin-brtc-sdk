@@ -87,6 +87,44 @@ class SignalingClientTest {
         assertTrue("URL should contain endpointToken", url.contains("endpointToken=test-token"))
     }
 
+    private fun uniqueIdOf(url: String): String =
+        Regex("[?&]uniqueId=([^&]+)").find(url)!!.groupValues[1]
+
+    @Test
+    fun `uniqueId is stable across connect calls on the same client`() = runTest {
+        val urls = mutableListOf<String>()
+        every { mockWebSocket.connect(capture(urls), any()) } answers {
+            secondArg<WebSocketEventListener>().onOpen()
+        }
+
+        client.connect(authParams, defaultOptions)
+        client.disconnect()
+        client.connect(authParams, defaultOptions)
+
+        assertEquals(2, urls.size)
+        assertEquals(
+            "uniqueId must be reused on every connect of the same instance",
+            uniqueIdOf(urls[0]),
+            uniqueIdOf(urls[1])
+        )
+    }
+
+    @Test
+    fun `uniqueId passed to the constructor is used by a replacement client`() = runTest {
+        val urls = mutableListOf<String>()
+        every { mockWebSocket.connect(capture(urls), any()) } answers {
+            secondArg<WebSocketEventListener>().onOpen()
+        }
+
+        // BandwidthRTC builds a fresh SignalingClient per reconnect, handing each the same id
+        SignalingClient(webSocketFactory = { mockWebSocket }, uniqueId = "instance-id")
+            .connect(authParams, defaultOptions)
+        SignalingClient(webSocketFactory = { mockWebSocket }, uniqueId = "instance-id")
+            .connect(authParams, defaultOptions)
+
+        assertEquals(listOf("instance-id", "instance-id"), urls.map { uniqueIdOf(it) })
+    }
+
     @Test
     fun `connect uses custom websocket URL from options`() = runTest {
         val urlSlot = slot<String>()
