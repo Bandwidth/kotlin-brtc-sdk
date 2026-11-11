@@ -27,6 +27,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import org.webrtc.PeerConnection
+import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.coroutines.resume
 import kotlin.random.Random
@@ -97,6 +98,12 @@ class BandwidthRTC(
      * again, so applications should surface this rather than keep showing a connected state.
      */
     var onError: ((Throwable) -> Unit)? = null
+
+    /**
+     * Identifies this SDK instance to the gateway. Generated once and sent on every connect(),
+     * including reconnects (which build a fresh SignalingClient), matching the JS SDK.
+     */
+    private val uniqueId: String = UUID.randomUUID().toString()
 
     internal var signaling: SignalingClientInterface? = null
     internal var peerConnectionManager: PeerConnectionManagerInterface? = null
@@ -262,7 +269,7 @@ class BandwidthRTC(
 
         val sig: SignalingClientInterface = signaling
             ?: injectedSignaling?.also { signaling = it }
-            ?: SignalingClient(diagnostics = diagnosticsBatcher).also { signaling = it }
+            ?: SignalingClient(diagnostics = diagnosticsBatcher, uniqueId = uniqueId).also { signaling = it }
 
         registerEventHandlers(sig)
 
